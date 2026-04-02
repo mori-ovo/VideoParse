@@ -6,7 +6,7 @@ __pycache__/
 .ruff_cache/
 .venv/
 venv/
-_init__.py
+__init__.py
 
 # Node
 node_modules/
@@ -28,4 +28,3 @@ output/*
 .env
 backend/.env
 frontend/.env
-
