@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+_init__.py
+
+# Node
+node_modules/
+dist/
+
+# IDE
+.idea/
+.vscode/
+
+# Runtime
+temp/*
+cache/*
+output/*
+!temp/.gitkeep
+!cache/.gitkeep
+!output/.gitkeep
+
+# Env
+.env
+backend/.env
+frontend/.env
+
