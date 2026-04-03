@@ -335,13 +335,14 @@ class TaskService:
         proxy_base_url = f"{settings.api_public_origin}{settings.api_v1_prefix}/tasks/{task_id}/proxy"
 
         if metadata.direct_url:
+            redirect_url = f"{redirect_base_url}?kind=single"
             proxy_url = f"{proxy_base_url}?kind=single"
             return TaskResult(
                 result_type=ResultType.DIRECT,
-                play_url=proxy_url,
-                download_url=proxy_url,
+                play_url=redirect_url,
+                download_url=redirect_url,
                 direct_url=metadata.direct_url,
-                redirect_url=f"{redirect_base_url}?kind=single",
+                redirect_url=redirect_url,
                 proxy_url=proxy_url,
                 created_at=created_at,
                 expires_note="建议优先使用项目生成的 play_url 或 proxy_url。源站直链通常带时效。",
@@ -421,6 +422,7 @@ class TaskService:
             except Exception:  # noqa: BLE001
                 logger.exception("failed to parse task record from index")
                 continue
+            task = self._migrate_task_result_links(task)
             tasks[task.task_id] = task
         return tasks
 
@@ -438,6 +440,23 @@ class TaskService:
             )
         except OSError:
             logger.exception("failed to persist task index: %s", index_path)
+
+    def _migrate_task_result_links(self, task: TaskRecord) -> TaskRecord:
+        result = task.result
+        if result is None or result.result_type != ResultType.DIRECT:
+            return task
+        if not result.redirect_url:
+            return task
+        if result.play_url == result.redirect_url and result.download_url == result.redirect_url:
+            return task
+
+        migrated_result = result.model_copy(
+            update={
+                "play_url": result.redirect_url,
+                "download_url": result.redirect_url,
+            }
+        )
+        return task.model_copy(update={"result": migrated_result})
 
     def detect_platform(self, source_url: str) -> Platform:
         for platform, pattern in PLATFORM_PATTERNS:
