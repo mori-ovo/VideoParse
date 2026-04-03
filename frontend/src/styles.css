@@ -131,30 +131,6 @@ input {
   margin-top: 28px;
 }
 
-.mode-row {
-  display: inline-flex;
-  gap: 8px;
-  margin-top: 24px;
-  padding: 8px;
-  border-radius: 18px;
-  background: rgba(24, 33, 46, 0.05);
-}
-
-.mode-button {
-  min-height: 42px;
-  padding: 0 16px;
-  border: none;
-  border-radius: 14px;
-  background: transparent;
-  color: #4a5665;
-  cursor: pointer;
-}
-
-.mode-button.active {
-  background: #18212e;
-  color: #ffffff;
-}
-
 .url-input {
   min-height: 56px;
   padding: 0 18px;
@@ -265,10 +241,17 @@ input {
   width: fit-content;
   min-height: 48px;
   padding: 0 18px;
+  border: none;
   border-radius: 16px;
   background: #18212e;
   color: #ffffff;
   text-decoration: none;
+  cursor: pointer;
+}
+
+.download-link:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .secondary-link {
@@ -279,6 +262,15 @@ input {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.url-preview {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(24, 33, 46, 0.05);
+  color: #445063;
+  word-break: break-all;
 }
 
 .notice {
@@ -292,6 +284,10 @@ input {
 
 .notice-error {
   background: rgba(211, 59, 59, 0.1);
+  color: #a12626;
+}
+
+.task-error {
   color: #a12626;
 }
 

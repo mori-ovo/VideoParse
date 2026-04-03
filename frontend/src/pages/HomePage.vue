@@ -42,7 +42,9 @@ onBeforeUnmount(() => {
           <li>缓存保留时长：{{ health?.cleanup_retention_hours ?? '-' }} 小时</li>
           <li>yt-dlp 可用：{{ health?.yt_dlp_available ? '是' : '否' }}</li>
           <li>ffmpeg 可用：{{ health?.ffmpeg_available ? '是' : '否' }}</li>
-          <li>默认模式：{{ health?.default_delivery_mode === 'direct' ? '直链优先' : '下载合流' }}</li>
+          <li>
+            默认模式：{{ health?.default_delivery_mode === 'auto' ? '自动解析' : health?.default_delivery_mode }}
+          </li>
           <li>支持站点：{{ health?.supported_platforms?.join(' / ') ?? '-' }}</li>
           <li>任务轮询状态：{{ polling ? '进行中' : '空闲' }}</li>
         </ul>

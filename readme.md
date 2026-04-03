@@ -1,271 +1,288 @@
 # VideoParse
 
-一个面向少量内部用户的万能视频解析项目，采用前后端分离结构，目标是优先返回可用媒体地址，而不是默认把所有视频都下载到本地。
+一个面向少量内部使用场景的万能视频解析项目，采用前后端分离结构。
 
-当前项目重点场景：
+当前目标不是“做一个大规模下载站”，而是“优先拿到可用直链；如果源站只有音视频分离流，就自动下载并合成为单文件，再给出项目自己的可访问地址”，方便转发到 `VRChat` 之类只认视频 URL 的场景。
 
-- 解析 `Bilibili`、`Douyin`、`Twitter / X`、`YouTube`、`Reddit`
-- 给用户返回可访问的媒体地址
-- 优先服务 `VRChat` 这类“需要一个可用 URL”的转发场景
-- 部署在 `1C1G Ubuntu` 小规格服务器上，尽量控制 CPU、内存、磁盘占用
+支持平台：
 
-## 1. 当前定位
+- `Bilibili`
+- `抖音`
+- `Twitter / X`
+- `YouTube`
+- `Reddit`
 
-这个项目现在不是“下载优先”的站点，而是“直链优先”的解析服务：
+## 核心策略
 
-- 默认模式是 `delivery_mode=direct`
-- 只有用户显式选择 `download` 时，后端才会执行真实下载
-- 如果视频和音频分离，且用户选择了 `download`，后端才会调用 `ffmpeg` 合流
-- 如果源站本身就有可播放的单文件媒体流，优先返回项目生成的代理直链
+当前默认流程已经改为 `auto`：
 
-这套策略更适合 `1C1G` 服务器，也更符合“拿地址转发给其他应用使用”的目标。
+1. 用户提交视频页面链接。
+2. 后端先用 `yt-dlp` 提取媒体信息。
+3. 如果源站本身就有单文件直链，直接返回可复制地址。
+4. 如果源站只有音视频分离流，后端自动下载并通过 `ffmpeg` 合流。
+5. 最终前端只保留两个主要动作：
+   - `复制直链`
+   - `下载视频`
 
-## 2. 当前已实现能力
+这套策略比“无脑全量下载”更适合 `1C1G Ubuntu` 小服务器，也更符合“拿链接转发”的项目目标。
 
-- 前后端分离
-- 基于 `yt-dlp` 的真实媒体解析
-- 支持平台识别：
-  - `bilibili`
-  - `douyin`
-  - `twitter`
-  - `youtube`
-  - `reddit`
-- 返回视频标题、时长、封面、发布者、解析器等基础元数据
-- 默认直链模式下返回：
-  - 源站原始地址 `direct_url`
-  - 项目重定向地址 `redirect_url`
-  - 项目代理地址 `proxy_url`
-- 对于音视频分离资源，返回：
-  - `video_url` / `audio_url`
-  - `video_redirect_url` / `audio_redirect_url`
-  - `video_proxy_url` / `audio_proxy_url`
-- 下载模式下：
-  - 使用 `yt-dlp` 下载
-  - 如有需要通过 `ffmpeg` 自动合流
-  - 返回项目托管的 `download_url`
-- 已支持按平台注入 `yt-dlp` 运行参数：
-  - `Bilibili` 可单独配置 `SOCKS5` 代理
-  - `YouTube` 可单独配置 cookies
-  - `Twitter / X` 可单独配置 cookies
-- 健康检查接口
-- 历史任务接口
-- `temp/` 与 `cache/` 每 `6` 小时自动清理一次，清理阈值同样是 `6` 小时
-
-## 3. 标准项目结构
+## 当前项目结构
 
 ```text
 VideoParse/
-├── frontend/                      # Vue 3 前端
-│   ├── src/
-│   │   ├── api/
-│   │   ├── components/
-│   │   ├── pages/
-│   │   ├── router/
-│   │   ├── stores/
-│   │   └── types/
-│   ├── index.html
-│   ├── package.json
-│   └── vite.config.ts
-├── backend/                       # FastAPI 后端
-│   ├── app/
-│   │   ├── adapters/
-│   │   ├── api/
-│   │   │   └── v1/endpoints/
-│   │   ├── core/
-│   │   ├── ffmpeg/
-│   │   ├── models/
-│   │   ├── schemas/
-│   │   ├── services/
-│   │   ├── storage/
-│   │   ├── tasks/
-│   │   └── utils/
-│   ├── main.py
-│   └── requirements.txt
-├── cache/                         # yt-dlp / 代理缓存目录
-├── temp/                          # 临时下载目录
-├── output/                        # 下载模式的最终文件输出目录
-├── deploy/
-├── docs/
-├── scripts/
-└── readme.md
+├─ frontend/                    # Vue 3 + Vite 前端
+│  ├─ src/
+│  │  ├─ api/
+│  │  ├─ components/
+│  │  ├─ pages/
+│  │  ├─ stores/
+│  │  └─ types/
+│  ├─ package.json
+│  └─ vite.config.ts
+├─ backend/                     # FastAPI 后端
+│  ├─ app/
+│  │  ├─ api/
+│  │  ├─ core/
+│  │  ├─ schemas/
+│  │  ├─ services/
+│  │  └─ utils/
+│  ├─ .env.example
+│  ├─ main.py
+│  └─ requirements.txt
+├─ cache/                       # yt-dlp / 代理缓存
+├─ temp/                        # 临时下载目录
+├─ output/                      # 合流后的最终文件
+├─ docs/
+└─ readme.md
 ```
 
-当前技术栈：
+## 结果类型说明
 
-- 前端：`Vue 3`、`Vite`、`TypeScript`、`Pinia`、`Vue Router`、`Axios`
-- 后端：`FastAPI`、`Pydantic`、`yt-dlp`、`httpx`
-- 媒体处理：`ffmpeg`
+后端仍然保留 3 种结果类型，但前端已经按统一流程整合：
 
-## 4. 核心处理流程
+### `direct`
 
-### 4.1 直链模式
+表示拿到了单文件媒体直链。
 
-1. 前端提交视频页面 URL 到 `POST /api/v1/parse`
-2. 后端创建任务并异步执行解析
-3. 后端通过 `yt-dlp` 提取元数据与媒体流信息
-4. 如果存在单文件可播流，返回 `direct` 结果
-5. 如果只有分离流，返回 `split_streams` 结果
-6. 前端展示可直接使用的项目 URL
+常见字段：
 
-### 4.2 下载模式
+- `direct_url`
+- `redirect_url`
+- `proxy_url`
 
-1. 前端提交 URL，`delivery_mode=download`
-2. 后端通过 `yt-dlp` 下载媒体
-3. 如果音视频分离且需要合流，调用 `ffmpeg`
-4. 后端把最终文件注册到本地存储索引
-5. 返回 `download_url`
+### `split_streams`
 
-## 5. 结果类型说明
+表示源站只提供分离流。
 
-后端结果分为 3 类：
+常见字段：
 
-| `result_type` | 说明 | 关键字段 | 适用场景 |
-| --- | --- | --- | --- |
-| `direct` | 存在单文件可播放媒体流 | `direct_url`、`redirect_url`、`proxy_url` | 最适合直链转发 |
-| `split_streams` | 只有分离的视频流和音频流 | `video_*`、`audio_*` | 源站没有单文件直链 |
-| `download` | 已下载并生成本地成品文件 | `file_id`、`download_url` | 必须提供单文件成品时 |
+- `video_url`
+- `audio_url`
+- `video_proxy_url`
+- `audio_proxy_url`
 
-需要特别说明：
+注意：在当前默认 `auto` 模式下，这种情况通常不会直接停在这里，而是会继续进入自动下载和合流。
 
-- `direct_playable=false` 不等于解析失败
-- 它只表示“当前没有单文件可播放 URL”
-- 例如 `Bilibili` 很多资源天然只有分离流，这时更常见的是 `split_streams`
-- 如果目标播放器必须吃一个单独的视频文件地址，那么应切换到 `download` 模式
+### `download`
 
-## 6. 项目生成直链的含义
+表示后端已经把最终单文件视频准备好，并返回项目自己的下载地址。
 
-你前面提到“能不能换个方法，比如让项目生成直链”，当前项目已经支持两种“项目生成地址”：
+常见字段：
 
-### 6.1 `redirect_url`
+- `file_id`
+- `download_url`
 
-示例：
+## 为什么 B 站经常拿不到“原始单文件直链”
 
-```text
-/api/v1/tasks/{task_id}/redirect?kind=single
+这不是项目单独造成的，而是很多 B 站视频本来就是音视频分离流。
+
+也就是说：
+
+- 你可以解析成功
+- 也可以拿到视频流和音频流
+- 但源站本身未必提供一个天然的单文件 URL
+
+所以当前项目的处理方式是：
+
+- 优先尝试单文件直链
+- 如果没有，就自动下载分离流
+- 使用 `ffmpeg` 合并成单文件
+- 再返回本项目自己的可访问地址
+
+## 平台登录态与代理策略
+
+### Bilibili
+
+建议优先配置：
+
+```env
+BILIBILI_PROXY=socks5://127.0.0.1:1080
+BILIBILI_SESSDATA=你的 SESSDATA
+BILIBILI_BILI_JCT=你的 bili_jct
+BILIBILI_DEDEUSERID=你的 DedeUserID
 ```
-
-特点：
-
-- 后端会重新解析任务对应的源站地址
-- 拿到最新媒体地址后返回 `307 redirect`
-- 服务端开销较小
-- 适合接受重定向的客户端
-
-### 6.2 `proxy_url`
-
-示例：
-
-```text
-/api/v1/tasks/{task_id}/proxy?kind=single
-```
-
-特点：
-
-- 由项目服务端代理源站媒体流
-- 支持 `GET` 和 `HEAD`
-- 支持转发 `Range` 请求
-- 保留了关键响应头，适合播放器或外部应用读取
-- 对 `VRChat` 这类需要稳定访问域名的场景更友好
-
-### 6.3 重要限制
-
-项目可以“生成项目自己的访问地址”，但不能凭空把一个不存在的单文件源站媒体变出来：
-
-- 如果源站只提供分离流，本项目只能返回 `video` / `audio` 代理地址
-- 如果业务目标必须得到一个单文件成品 URL，只能走 `download + ffmpeg` 合流
-- `direct_url` 往往带时效，不建议直接长期保存
-- 生产环境推荐优先使用 `proxy_url` 或 `redirect_url`
-
-## 7. 对 VRChat 的建议
-
-如果目标是把地址转发到 `VRChat`，建议按下面顺序使用：
-
-1. 优先使用 `proxy_url`
-2. 如果没有单文件流但目标能接受分离媒体，再尝试 `video_proxy_url` / `audio_proxy_url`
-3. 如果目标必须是一个单独文件，则使用 `download` 模式拿 `download_url`
 
 说明：
 
-- `proxy_url` 最稳定，但会消耗你服务器自己的出站带宽
-- `redirect_url` 更省资源，但依赖客户端是否接受重定向，以及源站链接是否及时刷新
-- 对 `1C1G` 机器来说，长期高并发代理并不合适，这个项目更适合少量内部使用
+- B 站对服务器 IP 风控较敏感，`412` 很常见。
+- 只在 `Bilibili` 上单独走 `SOCKS5`，比全站代理更省资源。
+- 如果只有 `SESSDATA`，也可以先试；但完整登录态通常更稳。
 
-## 8. 1C1G Ubuntu 服务器优化策略
+### YouTube
 
-当前实现已经按小机器思路做了取舍：
+建议配置完整 Cookie 字符串：
 
-- 默认 `direct` 模式，避免无意义下载
-- 下载格式限制为：
-
-```text
-best[height<=1080]/bestvideo*[height<=1080]+bestaudio/best
+```env
+YOUTUBE_COOKIES=完整的 YouTube Cookie 串
 ```
 
-- 代理采用流式转发，不整文件读入内存
-- 默认分块大小为 `65536`
-- 默认代理连接上限为 `20`
-- 任务状态当前保存在内存里，减少 Redis / 数据库依赖，适合几个人内部使用
-- 缓存目录定时清理，避免 `temp/` 和 `cache/` 持续膨胀
+说明：
 
-额外建议：
+- YouTube 的登录校验比较严格。
+- 手动只填一两个字段往往不稳定。
+- 当前项目仍支持旧的文件方式和旧变量名，但主模板已经不再强调它们。
 
-- 不要把它当大规模公网下载站来跑
-- 尽量让前端默认走 `direct`
-- 如果代理压力大，可以优先尝试 `redirect_url`
-- 如果你的服务器磁盘较小，减少使用 `download` 模式
-- 当前自动清理只处理 `temp/` 和 `cache/`，不会自动清理 `output/`
+### Twitter / X
 
-## 9. 缓存与文件清理策略
+优先使用最简配置：
 
-当前内置清理策略如下：
+```env
+TWITTER_AUTH_TOKEN=你的 auth_token
+TWITTER_CT0=你的 ct0
+```
 
-- 清理间隔：`6` 小时
-- 保留时长：`6` 小时
-- 清理目录：
-  - `temp/`
-  - `cache/`
+说明：
 
-不会被这套清理器自动删除的内容：
+- 你的很多场景只靠 `auth_token` 也可能成功。
+- 但如果推文涉及敏感内容、登录可见内容，`ct0` 一并配置通常更稳。
+- 如果你已经拿到了完整 Cookie 串，也可以填：
 
-- `output/` 里的真实下载成品
-- `.file-index.json` 中登记的下载结果
+```env
+TWITTER_COOKIES=auth_token=...; ct0=...
+```
 
-这意味着：
+## 推荐的 `.env` 最小配置
 
-- 直链模式产生的临时缓存会被自动回收
-- 下载模式产生的最终文件需要你自己决定是否长期保留
-- 如果后续下载模式用得多，建议补一个独立的 `output/` 生命周期清理策略
+生产环境示例：
 
-## 10. 接口概览
+```env
+APP_NAME=VideoParse API
+DEBUG=false
 
-### 10.1 基础接口
+FRONTEND_ORIGIN=https://moriparse.space
+API_PUBLIC_ORIGIN=https://moriparse.space
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| `GET` | `/` | 服务入口 |
-| `GET` | `/docs` | Swagger 文档 |
-| `GET` | `/api/v1/health` | 健康检查 |
-| `GET` | `/api/v1/history` | 最近任务历史 |
+CLEANUP_INTERVAL_HOURS=6
+CLEANUP_RETENTION_HOURS=6
 
-### 10.2 解析与任务接口
+USER_AGENT=
+PROXY=
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| `POST` | `/api/v1/parse` | 创建解析任务 |
-| `GET` | `/api/v1/tasks/{task_id}` | 查询任务状态 |
-| `GET` | `/api/v1/tasks/{task_id}/result` | 获取任务结果 |
-| `GET` | `/api/v1/tasks/{task_id}/redirect?kind=single\|video\|audio` | 获取项目重定向地址 |
-| `GET` / `HEAD` | `/api/v1/tasks/{task_id}/proxy?kind=single\|video\|audio` | 获取项目代理地址 |
+BILIBILI_PROXY=socks5://127.0.0.1:1080
+BILIBILI_SESSDATA=
+BILIBILI_BILI_JCT=
+BILIBILI_DEDEUSERID=
 
-### 10.3 下载文件接口
+YOUTUBE_COOKIES=
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| `GET` | `/api/v1/files/{file_id}/download` | 下载后端托管的最终文件 |
+TWITTER_AUTH_TOKEN=
+TWITTER_CT0=
 
-## 11. 请求示例
+DOWNLOAD_FORMAT=bestvideo*[height<=1080]+bestaudio/best[height<=1080]/best
+MERGE_OUTPUT_FORMAT=mp4
+```
 
-### 11.1 默认直链模式
+说明：
+
+- `FRONTEND_ORIGIN` 和 `API_PUBLIC_ORIGIN` 在你走反向代理到同一主域名时，通常都不需要再带 `:5173` / `:8000`。
+- 只要外部用户最终访问的是 `https://moriparse.space`，这里就应该写这个公开地址。
+- 端口只用于本机服务监听，不应该继续出现在对外返回的下载地址里。
+
+## 1C1G 服务器优化思路
+
+当前默认实现已经按小机器做了取舍：
+
+- 默认只在必要时下载，不再一上来就跑全量下载。
+- 默认下载格式限制到 `1080p`，避免高码率素材把 CPU、磁盘和带宽打满。
+- 只有需要单文件成品时才走 `ffmpeg` 合流。
+- 缓存和临时目录每 `6` 小时自动清理一次。
+- 任务状态只保存在内存中，避免额外引入 Redis / 数据库。
+
+仍需注意：
+
+- `output/` 里的最终文件不会被当前清理器自动删除。
+- 如果后续下载型任务多了，建议再补一个 `output/` 生命周期清理策略。
+
+## 常见问题
+
+### 1. 为什么健康检查是正常的，但前端报解析失败？
+
+先检查反向代理是否把 `/api/` 指向了后端，而不是错误地回退到了前端静态页。
+
+正确现象应该是：
+
+```bash
+curl https://your-domain/api/v1/health
+```
+
+返回 JSON，而不是 `index.html`。
+
+### 2. 为什么 YouTube 报 `Requested format is not available`？
+
+当前后端已经加入格式回退逻辑：
+
+- 先按配置的下载格式尝试
+- 如果目标格式不可用，再自动回退到更宽松的格式
+
+同时默认格式已改得更保守，适合小机器。
+
+### 3. 为什么 Twitter 明明有视频，却说 `No video could be found in this tweet`？
+
+常见原因不是“真的没视频”，而是：
+
+- 该推文需要登录后才可见
+- 该内容是敏感内容
+- 当前 Cookie 不完整
+- 当前账号本身没有权限看到完整媒体
+
+优先先试：
+
+```env
+TWITTER_AUTH_TOKEN=...
+TWITTER_CT0=...
+```
+
+### 4. 为什么 Bilibili 会报 `412`？
+
+这通常是平台风控，不是前端问题。
+
+优先检查：
+
+- `BILIBILI_PROXY`
+- `BILIBILI_SESSDATA`
+- `BILIBILI_BILI_JCT`
+- `BILIBILI_DEDEUSERID`
+
+## 接口概览
+
+### 基础接口
+
+- `GET /api/v1/health`
+- `GET /api/v1/history`
+
+### 解析相关
+
+- `POST /api/v1/parse`
+- `GET /api/v1/tasks/{task_id}`
+- `GET /api/v1/tasks/{task_id}/result`
+- `GET /api/v1/tasks/{task_id}/redirect?kind=single|video|audio`
+- `GET /api/v1/tasks/{task_id}/proxy?kind=single|video|audio`
+
+### 文件下载
+
+- `GET /api/v1/files/{file_id}/download`
+
+## 请求示例
 
 ```http
 POST /api/v1/parse
@@ -273,82 +290,13 @@ Content-Type: application/json
 
 {
   "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-  "delivery_mode": "direct"
+  "delivery_mode": "auto"
 }
 ```
 
-### 11.2 强制下载模式
+## 开发运行
 
-```http
-POST /api/v1/parse
-Content-Type: application/json
-
-{
-  "url": "https://www.bilibili.com/video/BV1Mj411P7mA/",
-  "delivery_mode": "download"
-}
-```
-
-### 11.3 健康检查返回示意
-
-```json
-{
-  "status": "ok",
-  "app_name": "VideoParse API",
-  "cleanup_interval_hours": 6,
-  "cleanup_retention_hours": 6,
-  "api_public_origin": "http://127.0.0.1:8000",
-  "yt_dlp_available": true,
-  "ffmpeg_available": true,
-  "default_delivery_mode": "direct",
-  "supported_platforms": [
-    "bilibili",
-    "douyin",
-    "twitter",
-    "youtube",
-    "reddit"
-  ]
-}
-```
-
-## 12. 平台层面的现实说明
-
-当前项目底层依赖 `yt-dlp`，不同平台的行为以实际返回结果为准。
-
-### `Bilibili`
-
-- 很多视频没有单文件直链
-- 常见情况是返回分离流
-- 当前项目已支持返回 `video_proxy_url` / `audio_proxy_url`
-- 如果目标必须是一个单文件 URL，建议走 `download`
-
-### `YouTube`
-
-- 既可能拿到单文件可播流，也可能出现分离流
-- 当前实现已验证单文件代理链路可用
-- 下载模式已限制在更保守的格式范围，避免小服务器压力过大
-
-### `Twitter / X`
-
-- 有些帖子可以直接得到单文件媒体
-- 有些帖子没有公开视频资源，或受登录态、地区、帖子状态影响
-- “可以下载但没有单文件直链”在这个平台上并不罕见
-
-### `Douyin` / `Reddit`
-
-- 当前也走 `yt-dlp` 统一提取
-- 是否返回单文件流取决于源站实际资源结构
-
-## 13. Ubuntu 部署建议
-
-### 13.1 安装系统依赖
-
-```bash
-sudo apt update
-sudo apt install -y ffmpeg python3 python3-venv python3-pip nodejs npm
-```
-
-### 13.2 启动后端
+### 后端
 
 ```bash
 cd backend
@@ -358,7 +306,7 @@ pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-### 13.3 启动前端
+### 前端
 
 ```bash
 cd frontend
@@ -366,99 +314,28 @@ npm install
 npm run dev
 ```
 
-开发环境默认地址：
+### 生产构建
 
-- 前端：`http://127.0.0.1:5173`
-- 后端：`http://127.0.0.1:8000`
-- 健康检查：`http://127.0.0.1:8000/api/v1/health`
-- 接口文档：`http://127.0.0.1:8000/docs`
-
-前端开发服务器已经配置了 `/api` 代理到 `http://127.0.0.1:8000`。
-
-## 14. 关键环境变量
-
-后端配置位于 `backend/app/core/config.py`，建议至少关注下面这些：
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `FRONTEND_ORIGIN` | `http://127.0.0.1:5173` | 前端来源，用于 CORS |
-| `API_PUBLIC_ORIGIN` | `http://127.0.0.1:8000` | 生成对外可访问 URL 的基准地址 |
-| `CLEANUP_INTERVAL_HOURS` | `6` | 缓存清理周期 |
-| `CLEANUP_RETENTION_HOURS` | `6` | 缓存保留时间 |
-| `YT_DLP_PROXY` | 空 | 全局 `yt-dlp` 代理地址 |
-| `YT_DLP_COOKIES` | 空 | 全局 Cookie 字符串，直接写在 `.env` 中 |
-| `YT_DLP_COOKIES_FILE` | 空 | 全局 cookies 文件路径 |
-| `YT_DLP_USER_AGENT` | 空 | 全局 `yt-dlp` User-Agent |
-| `YT_DLP_BILIBILI_PROXY` | 空 | 仅 `Bilibili` 使用的代理，例如 `socks5://127.0.0.1:1080` |
-| `YT_DLP_BILIBILI_COOKIES` | 空 | 仅 `Bilibili` 使用的 Cookie 字符串 |
-| `YT_DLP_BILIBILI_COOKIES_FILE` | 空 | 仅 `Bilibili` 使用的 cookies 文件 |
-| `YT_DLP_YOUTUBE_COOKIES` | 空 | 仅 `YouTube` 使用的 Cookie 字符串 |
-| `YT_DLP_YOUTUBE_COOKIES_FILE` | 空 | 仅 `YouTube` 使用的 cookies 文件 |
-| `YT_DLP_TWITTER_COOKIES` | 空 | 仅 `Twitter / X` 使用的 Cookie 字符串 |
-| `YT_DLP_TWITTER_COOKIES_FILE` | 空 | 仅 `Twitter / X` 使用的 cookies 文件 |
-| `YT_DLP_DOWNLOAD_FORMAT` | `best[height<=1080]/bestvideo*[height<=1080]+bestaudio/best` | 下载模式的默认格式策略 |
-| `YT_DLP_MERGE_OUTPUT_FORMAT` | `mp4` | 合流输出格式 |
-| `FFMPEG_LOCATION` | 空 | `ffmpeg` 可执行文件路径，可选 |
-| `PROXY_TIMEOUT_SECONDS` | `30` | 代理请求超时 |
-| `PROXY_CHUNK_SIZE` | `65536` | 代理分块大小 |
-| `PROXY_MAX_CONNECTIONS` | `20` | 代理连接上限 |
-
-前端可选环境变量：
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `VITE_API_BASE_URL` | `/api/v1` | 前端请求 API 的基础路径 |
-
-生产环境最关键的一项是：
-
-```env
-API_PUBLIC_ORIGIN=https://your-domain-or-public-ip
+```bash
+cd frontend
+npm run build
 ```
 
-如果这里还是本地地址，那么返回给用户的 `proxy_url`、`redirect_url`、`download_url` 都会指向错误位置。
+## 当前阶段结论
 
-按平台定制的一个典型示例：
+这个项目现在已经不是纯规划状态，而是一个围绕“直链优先、必要时自动合流”的基础可运行版本。
 
-```env
-FRONTEND_ORIGIN=https://moriparse.space
-API_PUBLIC_ORIGIN=https://moriparse.space
-
-YT_DLP_BILIBILI_PROXY=socks5://127.0.0.1:1080
-YT_DLP_BILIBILI_COOKIES="SESSDATA=...; bili_jct=...; DedeUserID=..."
-YT_DLP_YOUTUBE_COOKIES="SID=...; HSID=...; SSID=..."
-YT_DLP_TWITTER_COOKIES="auth_token=...; ct0=..."
-```
-
-## 15. 当前限制
-
-当前版本更偏向“小团队内部可用骨架”，还存在这些限制：
-
-- 任务和历史记录当前保存在内存中，服务重启后会丢失
-- 还没有接入数据库和 Redis
-- 还没有真正的异步任务队列
-- `output/` 没有独立生命周期管理
-- 部分平台即使配置了 cookies，仍可能受到 IP 风控、地区或账号可见性限制
-- 不处理 DRM、付费绕过或受限内容破解
-
-## 16. 后续迭代建议
-
-建议后续按下面顺序推进：
-
-1. 把任务存储迁移到数据库
-2. 引入 Redis / 队列系统处理异步任务
-3. 为下载成品增加生命周期清理策略
-4. 为不同平台补充更细的 cookies、代理和 extractor 参数策略
-5. 根据不同平台做更细的直链筛选策略
-6. 为生产环境补充 Nginx、进程守护与日志采集
-
-## 17. 当前结论
-
-这个项目现在已经不是最初的“规划文档阶段”，而是一个可运行的基础版本：
+已完成的方向：
 
 - 已接入真实下载器 `yt-dlp`
-- 已支持项目生成的代理直链和重定向直链
-- 已针对 `1C1G Ubuntu` 服务器做了默认策略收敛
-- 已把缓存清理周期固定为每 `6` 小时
-- 已把主要使用目标调整为“拿到可用地址并转发”，而不是默认重下载所有视频
+- 已支持 `ffmpeg` 自动合流
+- 已支持 Bilibili 单独走 `SOCKS5`
+- 已支持 YouTube / Twitter / Bilibili 通过 `.env` 注入登录态
+- 已把缓存清理固定为每 `6` 小时一次
+- 已把前端主要操作收敛为“复制直链”和“下载视频”
 
-如果后面继续扩展，最重要的不是再堆更多平台，而是先把“任务持久化、下载文件生命周期、生产环境部署链路”补完整。
+下一阶段如果继续做，优先级建议是：
+
+1. 给 `output/` 加生命周期清理
+2. 增加任务持久化
+3. 根据不同平台补更细的登录态检查和错误提示

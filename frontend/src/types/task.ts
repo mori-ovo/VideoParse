@@ -1,5 +1,5 @@
 export type Platform = 'bilibili' | 'douyin' | 'twitter' | 'youtube' | 'reddit'
-export type DeliveryMode = 'direct' | 'download'
+export type DeliveryMode = 'auto' | 'direct' | 'download'
 
 export type TaskStatus =
   | 'pending'
@@ -56,7 +56,7 @@ export interface TaskRecord {
 
 export interface ParseRequest {
   url: string
-  delivery_mode: DeliveryMode
+  delivery_mode?: DeliveryMode
 }
 
 export interface ParseAcceptedResponse {

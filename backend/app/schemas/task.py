@@ -13,6 +13,7 @@ class Platform(str, Enum):
 
 
 class DeliveryMode(str, Enum):
+    AUTO = "auto"
     DIRECT = "direct"
     DOWNLOAD = "download"
 
@@ -58,7 +59,7 @@ class TaskRecord(BaseModel):
     task_id: str
     source_url: str
     platform: Platform
-    delivery_mode: DeliveryMode = DeliveryMode.DIRECT
+    delivery_mode: DeliveryMode = DeliveryMode.AUTO
     status: TaskStatus
     progress: int = Field(default=0, ge=0, le=100)
     title: str

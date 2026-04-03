@@ -1,9 +1,9 @@
+import axios from 'axios'
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import axios from 'axios'
 
 import { createParseTask, fetchHealth, fetchHistory, fetchTask, fetchTaskResult } from '../api/parse'
-import type { DeliveryMode, HealthResponse, TaskRecord, TaskResult, TaskStatus } from '../types/task'
+import type { HealthResponse, TaskRecord, TaskResult, TaskStatus } from '../types/task'
 
 const TERMINAL_STATUSES: TaskStatus[] = ['success', 'failed']
 
@@ -49,6 +49,7 @@ export const useTaskStore = defineStore('task', () => {
       window.clearInterval(pollTimer)
       pollTimer = null
     }
+
     polling.value = false
   }
 
@@ -68,16 +69,16 @@ export const useTaskStore = defineStore('task', () => {
     }
   }
 
-  async function submitUrl(url: string, deliveryMode: DeliveryMode): Promise<void> {
+  async function submitUrl(url: string): Promise<void> {
     stopPolling()
     errorMessage.value = ''
     currentResult.value = null
     submitting.value = true
 
     try {
-      const response = await createParseTask({ url, delivery_mode: deliveryMode })
+      const response = await createParseTask({ url, delivery_mode: 'auto' })
       if (!isObject(response) || !isTaskRecord(response.task)) {
-        throw new Error('解析接口返回格式不正确，请检查 /api/v1/parse 是否已正确反向代理到后端。')
+        throw new Error('解析接口返回格式不正确，请检查 /api/v1/parse 是否正确反向代理到后端。')
       }
 
       currentTask.value = response.task
@@ -102,7 +103,7 @@ export const useTaskStore = defineStore('task', () => {
       try {
         const task = await fetchTask(taskId)
         if (!isTaskRecord(task)) {
-          throw new Error('任务接口返回格式不正确，请检查 /api/v1/tasks 是否已正确反向代理到后端。')
+          throw new Error('任务接口返回格式不正确，请检查 /api/v1/tasks 是否正确反向代理到后端。')
         }
 
         currentTask.value = task

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -21,19 +21,83 @@ class Settings(BaseSettings):
 
     cleanup_interval_hours: int = 6
     cleanup_retention_hours: int = 6
-    yt_dlp_proxy: str | None = None
-    yt_dlp_cookies: str | None = None
-    yt_dlp_cookies_file: str | None = None
-    yt_dlp_user_agent: str | None = None
-    yt_dlp_bilibili_proxy: str | None = None
-    yt_dlp_bilibili_cookies: str | None = None
-    yt_dlp_bilibili_cookies_file: str | None = None
-    yt_dlp_youtube_cookies: str | None = None
-    yt_dlp_youtube_cookies_file: str | None = None
-    yt_dlp_twitter_cookies: str | None = None
-    yt_dlp_twitter_cookies_file: str | None = None
-    yt_dlp_download_format: str = "best[height<=1080]/bestvideo*[height<=1080]+bestaudio/best"
-    yt_dlp_merge_output_format: str = "mp4"
+
+    proxy: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("PROXY", "YT_DLP_PROXY"),
+    )
+    cookies: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("COOKIES", "YT_DLP_COOKIES"),
+    )
+    cookies_file: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("COOKIES_FILE", "YT_DLP_COOKIES_FILE"),
+    )
+    user_agent: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("USER_AGENT", "YT_DLP_USER_AGENT"),
+    )
+
+    bilibili_proxy: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("BILIBILI_PROXY", "YT_DLP_BILIBILI_PROXY"),
+    )
+    bilibili_cookies: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("BILIBILI_COOKIES", "YT_DLP_BILIBILI_COOKIES"),
+    )
+    bilibili_cookies_file: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("BILIBILI_COOKIES_FILE", "YT_DLP_BILIBILI_COOKIES_FILE"),
+    )
+    bilibili_sessdata: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("BILIBILI_SESSDATA"),
+    )
+    bilibili_bili_jct: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("BILIBILI_BILI_JCT"),
+    )
+    bilibili_dedeuserid: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("BILIBILI_DEDEUSERID", "BILIBILI_DEDE_USER_ID"),
+    )
+
+    youtube_cookies: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("YOUTUBE_COOKIES", "YT_DLP_YOUTUBE_COOKIES"),
+    )
+    youtube_cookies_file: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("YOUTUBE_COOKIES_FILE", "YT_DLP_YOUTUBE_COOKIES_FILE"),
+    )
+
+    twitter_cookies: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TWITTER_COOKIES", "YT_DLP_TWITTER_COOKIES"),
+    )
+    twitter_cookies_file: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TWITTER_COOKIES_FILE", "YT_DLP_TWITTER_COOKIES_FILE"),
+    )
+    twitter_auth_token: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TWITTER_AUTH_TOKEN"),
+    )
+    twitter_ct0: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TWITTER_CT0"),
+    )
+
+    download_format: str = Field(
+        default="bestvideo*[height<=1080]+bestaudio/best[height<=1080]/best",
+        validation_alias=AliasChoices("DOWNLOAD_FORMAT", "YT_DLP_DOWNLOAD_FORMAT"),
+    )
+    merge_output_format: str = Field(
+        default="mp4",
+        validation_alias=AliasChoices("MERGE_OUTPUT_FORMAT", "YT_DLP_MERGE_OUTPUT_FORMAT"),
+    )
     ffmpeg_location: str | None = None
     proxy_timeout_seconds: int = 30
     proxy_chunk_size: int = 65536

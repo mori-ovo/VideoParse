@@ -17,7 +17,7 @@ async def health_check() -> dict[str, object]:
         "api_public_origin": settings.api_public_origin,
         "yt_dlp_available": availability.yt_dlp_available,
         "ffmpeg_available": availability.ffmpeg_available,
-        "default_delivery_mode": "direct",
+        "default_delivery_mode": "auto",
         "supported_platforms": [
             "bilibili",
             "douyin",

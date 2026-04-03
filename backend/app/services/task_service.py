@@ -7,8 +7,8 @@ from uuid import uuid4
 
 from fastapi import HTTPException, status
 
-from app.schemas.parse import ParseRequest
 from app.core.config import settings
+from app.schemas.parse import ParseRequest
 from app.schemas.task import DeliveryMode, Platform, ResultType, TaskRecord, TaskResult, TaskStatus
 from app.services.downloader_service import (
     DownloadProgressEvent,
@@ -39,11 +39,6 @@ class TaskService:
         platform = self.detect_platform(source_url)
         task_id = uuid4().hex
         now = datetime.now(timezone.utc)
-        requires_merge = platform in {
-            Platform.BILIBILI,
-            Platform.TWITTER,
-            Platform.YOUTUBE,
-        }
 
         task = TaskRecord(
             task_id=task_id,
@@ -52,9 +47,9 @@ class TaskService:
             delivery_mode=payload.delivery_mode,
             status=TaskStatus.PENDING,
             progress=0,
-            title=f"{platform.value} 解析任务",
-            message="任务已创建，等待进入解析流程。",
-            requires_merge=requires_merge,
+            title=f"{platform.value} parse task",
+            message="任务已创建，等待开始解析。",
+            requires_merge=platform in {Platform.BILIBILI, Platform.TWITTER, Platform.YOUTUBE},
             direct_playable=False,
             created_at=now,
             updated_at=now,
@@ -70,11 +65,7 @@ class TaskService:
 
     async def list_tasks(self, limit: int = 20) -> list[TaskRecord]:
         async with self._lock:
-            tasks = sorted(
-                self._tasks.values(),
-                key=lambda item: item.created_at,
-                reverse=True,
-            )
+            tasks = sorted(self._tasks.values(), key=lambda item: item.created_at, reverse=True)
         return tasks[:limit]
 
     async def get_result(self, task_id: str) -> TaskResult | None:
@@ -93,7 +84,7 @@ class TaskService:
                 task_id=task_id,
                 status_value=TaskStatus.PARSING,
                 progress=10,
-                message="正在通过 yt-dlp 提取视频元数据。",
+                message="正在通过 yt-dlp 提取视频信息。",
             )
 
             metadata = await downloader_service.extract_metadata(task.source_url)
@@ -101,7 +92,7 @@ class TaskService:
                 task_id=task_id,
                 status_value=TaskStatus.PARSING,
                 progress=30,
-                message="元数据提取完成，准备生成结果。",
+                message="视频信息提取完成，正在判断是否需要自动合流。",
                 extra_updates={
                     "title": metadata.title,
                     "requires_merge": metadata.requires_merge,
@@ -119,16 +110,22 @@ class TaskService:
 
             if task.delivery_mode == DeliveryMode.DIRECT:
                 result = self._build_direct_result(task_id=task_id, metadata=metadata)
-                message = (
-                    "已提取单文件直链，适合低内存转发。优先把 proxy_url 提供给 VRChat。"
-                    if result.result_type == ResultType.DIRECT
-                    else "已提取分离流直链，但当前源站没有单文件直链。若 VRChat 需要单 URL，请切换到下载合流模式。"
-                )
                 await self._update_task(
                     task_id=task_id,
                     status_value=TaskStatus.SUCCESS,
                     progress=100,
-                    message=message,
+                    message=self._build_direct_message(result.result_type),
+                    result=result,
+                )
+                return
+
+            if task.delivery_mode == DeliveryMode.AUTO and metadata.direct_url:
+                result = self._build_direct_result(task_id=task_id, metadata=metadata)
+                await self._update_task(
+                    task_id=task_id,
+                    status_value=TaskStatus.SUCCESS,
+                    progress=100,
+                    message="已生成可复制直链。你现在可以复制直链，或直接下载视频。",
                     result=result,
                 )
                 return
@@ -136,7 +133,7 @@ class TaskService:
             availability = downloader_service.availability()
             if metadata.requires_merge and not availability.ffmpeg_available:
                 raise DownloaderUnavailableError(
-                    "当前资源需要音视频合流，但服务器未找到 ffmpeg。请安装 ffmpeg 或在 backend/.env 中配置 FFMPEG_LOCATION。"
+                    "当前资源需要音视频合流，但服务器未找到 ffmpeg。请先安装 ffmpeg 或配置 FFMPEG_LOCATION。"
                 )
 
             loop = asyncio.get_running_loop()
@@ -159,30 +156,31 @@ class TaskService:
                     task_id=task_id,
                     status_value=TaskStatus.MERGING,
                     progress=90,
-                    message="音视频资源已下载完成，并已通过 ffmpeg 自动合流。",
+                    message="源站是分离流，已自动下载并通过 ffmpeg 合流。",
                 )
 
             await self._update_task(
                 task_id=task_id,
                 status_value=TaskStatus.UPLOADING,
                 progress=95,
-                message="正在注册下载结果并生成直链。",
+                message="正在注册最终视频文件并生成下载地址。",
                 extra_updates={
                     "title": downloaded_media.title,
                     "requires_merge": downloaded_media.requires_merge,
-                    "direct_playable": False,
+                    "direct_playable": metadata.direct_playable,
                     "uploader": downloaded_media.uploader,
                     "duration": downloaded_media.duration,
                     "thumbnail": downloaded_media.thumbnail,
                     "extractor": downloaded_media.extractor,
                 },
             )
+
             result = await storage_service.register_downloaded_file(downloaded_media.file_path)
             await self._update_task(
                 task_id=task_id,
                 status_value=TaskStatus.SUCCESS,
                 progress=100,
-                message="任务完成，真实下载文件已生成。",
+                message="已生成单文件视频。你现在可以复制直链，或直接下载视频。",
                 result=result,
             )
         except (DownloaderUnavailableError, DownloaderExecutionError) as exc:
@@ -204,11 +202,7 @@ class TaskService:
                 error_message=f"出现未预期错误：{exc}",
             )
 
-    async def _apply_progress_event(
-        self,
-        task_id: str,
-        event: DownloadProgressEvent,
-    ) -> None:
+    async def _apply_progress_event(self, task_id: str, event: DownloadProgressEvent) -> None:
         status_value = TaskStatus.DOWNLOADING
         if event.status == "merging":
             status_value = TaskStatus.MERGING
@@ -250,7 +244,7 @@ class TaskService:
                 return metadata.direct_url
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="当前源站没有可直接播放的单文件直链，请改用 video/audio 分离流，或切换到下载模式。",
+                detail="当前源站没有单文件直链，请改用自动模式生成单文件下载地址。",
             )
 
         if kind == "video":
@@ -286,10 +280,16 @@ class TaskService:
             return task.result.audio_url
         return None
 
+    def _build_direct_message(self, result_type: ResultType) -> str:
+        if result_type == ResultType.DIRECT:
+            return "已生成可复制直链。你现在可以复制直链，或直接下载视频。"
+        return "当前只拿到了分离流地址。若需要单文件，请使用自动模式。"
+
     def _build_direct_result(self, task_id: str, metadata: Any) -> TaskResult:
         created_at = datetime.now(timezone.utc)
         base_url = f"{settings.api_public_origin}{settings.api_v1_prefix}/tasks/{task_id}/redirect"
         proxy_base_url = f"{settings.api_public_origin}{settings.api_v1_prefix}/tasks/{task_id}/proxy"
+
         if metadata.direct_url:
             return TaskResult(
                 result_type=ResultType.DIRECT,
@@ -297,7 +297,7 @@ class TaskService:
                 redirect_url=f"{base_url}?kind=single",
                 proxy_url=f"{proxy_base_url}?kind=single",
                 created_at=created_at,
-                expires_note="源站直链通常带时效。对 VRChat 建议优先使用 proxy_url 或 redirect_url，由服务端按需刷新。",
+                expires_note="建议优先使用项目生成的 proxy_url。源站直链通常带时效。",
             )
 
         if metadata.video_url or metadata.audio_url:
@@ -310,10 +310,10 @@ class TaskService:
                 audio_redirect_url=f"{base_url}?kind=audio" if metadata.audio_url else None,
                 audio_proxy_url=f"{proxy_base_url}?kind=audio" if metadata.audio_url else None,
                 created_at=created_at,
-                expires_note="当前任务仅拿到了分离流直链。可以使用项目生成的 video/audio 代理地址；若目标播放器必须使用单一 URL，请切换到下载合流模式。",
+                expires_note="当前只有分离流地址。自动模式会下载并合成为单文件。",
             )
 
-        raise DownloaderExecutionError("未能从 yt-dlp 提取到可用的媒体直链。")
+        raise DownloaderExecutionError("未能通过 yt-dlp 提取到可用的媒体地址。")
 
     async def _update_task(
         self,
@@ -355,7 +355,7 @@ class TaskService:
 
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="当前只支持哔哩哔哩、抖音、Twitter/X、YouTube、Reddit 链接。",
+            detail="当前只支持 bilibili、douyin、twitter/x、youtube、reddit 链接。",
         )
 
 

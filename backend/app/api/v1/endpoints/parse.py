@@ -14,5 +14,5 @@ async def create_parse_task(payload: ParseRequest) -> ParseAcceptedResponse:
     asyncio.create_task(task_service.run_download_pipeline(task.task_id))
     return ParseAcceptedResponse(
         task=task,
-        note="默认使用直链优先模式以降低 1C1G 服务器压力；只有显式切换到下载模式时，才会进行真实下载和 ffmpeg 合流。",
+        note="当前默认使用自动模式：有单文件直链就直接返回，没有则自动下载并合流。",
     )

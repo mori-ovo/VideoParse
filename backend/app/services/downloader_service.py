@@ -176,8 +176,7 @@ class DownloaderService:
         )
 
         try:
-            with yt_dlp.YoutubeDL(options) as ydl:
-                info = ydl.extract_info(url, download=True)
+            info = self._extract_info_with_format_fallback(yt_dlp, options, logger, url)
         except Exception as exc:  # noqa: BLE001
             message = logger.errors[-1] if logger.errors else str(exc)
             raise DownloaderExecutionError(self._build_guided_error_message(url, message)) from exc
@@ -201,6 +200,27 @@ class DownloaderService:
             extractor=extracted.extractor,
         )
 
+    def _extract_info_with_format_fallback(
+        self,
+        yt_dlp_module: Any,
+        options: dict[str, Any],
+        logger: YtDlpLogger,
+        url: str,
+    ) -> Any:
+        try:
+            with yt_dlp_module.YoutubeDL(options) as ydl:
+                return ydl.extract_info(url, download=True)
+        except Exception as exc:  # noqa: BLE001
+            message = logger.errors[-1] if logger.errors else str(exc)
+            if "Requested format is not available" not in message or "format" not in options:
+                raise
+
+            fallback_options = dict(options)
+            fallback_options.pop("format", None)
+            logger.errors.clear()
+            with yt_dlp_module.YoutubeDL(fallback_options) as ydl:
+                return ydl.extract_info(url, download=True)
+
     def _build_options(
         self,
         task_id: str,
@@ -212,7 +232,7 @@ class DownloaderService:
         output_dir = settings.output_dir / task_id
         temp_dir = settings.temp_dir / task_id
         options: dict[str, Any] = {
-            "merge_output_format": settings.yt_dlp_merge_output_format,
+            "merge_output_format": settings.merge_output_format,
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
@@ -228,8 +248,8 @@ class DownloaderService:
             "logger": logger,
         }
 
-        if download:
-            options["format"] = settings.yt_dlp_download_format
+        if download and settings.download_format:
+            options["format"] = settings.download_format
 
         if request_options.proxy:
             options["proxy"] = request_options.proxy
@@ -256,35 +276,72 @@ class DownloaderService:
 
     def _resolve_platform_request_options(self, url: str) -> PlatformRequestOptions:
         platform = self._detect_platform(url)
-        proxy = settings.yt_dlp_proxy
-        cookie_header = self._normalize_cookie_header(settings.yt_dlp_cookies)
-        cookies_file = settings.yt_dlp_cookies_file
+        proxy = settings.proxy
+        cookie_header = self._build_default_cookie_header()
+        cookies_file = settings.cookies_file
 
         if platform == Platform.BILIBILI:
-            proxy = settings.yt_dlp_bilibili_proxy or proxy
-            cookie_header = self._normalize_cookie_header(settings.yt_dlp_bilibili_cookies) or cookie_header
-            cookies_file = settings.yt_dlp_bilibili_cookies_file or cookies_file
+            proxy = settings.bilibili_proxy or proxy
+            cookie_header = self._build_bilibili_cookie_header() or cookie_header
+            cookies_file = settings.bilibili_cookies_file or cookies_file
         elif platform == Platform.YOUTUBE:
-            cookie_header = self._normalize_cookie_header(settings.yt_dlp_youtube_cookies) or cookie_header
-            cookies_file = settings.yt_dlp_youtube_cookies_file or cookies_file
+            cookie_header = self._normalize_cookie_header(settings.youtube_cookies) or cookie_header
+            cookies_file = settings.youtube_cookies_file or cookies_file
         elif platform == Platform.TWITTER:
-            cookie_header = self._normalize_cookie_header(settings.yt_dlp_twitter_cookies) or cookie_header
-            cookies_file = settings.yt_dlp_twitter_cookies_file or cookies_file
+            cookie_header = self._build_twitter_cookie_header() or cookie_header
+            cookies_file = settings.twitter_cookies_file or cookies_file
 
         resolved_cookie_file = None if cookie_header else self._resolve_cookie_file(cookies_file, platform)
-
         return PlatformRequestOptions(
             platform=platform,
             proxy=proxy,
             cookie_header=cookie_header,
             cookies_file=resolved_cookie_file,
-            user_agent=settings.yt_dlp_user_agent,
+            user_agent=settings.user_agent,
         )
+
+    def _build_default_cookie_header(self) -> str | None:
+        return self._normalize_cookie_header(settings.cookies)
+
+    def _build_bilibili_cookie_header(self) -> str | None:
+        direct_value = self._normalize_cookie_header(settings.bilibili_cookies)
+        if direct_value:
+            return direct_value
+        return self._join_cookie_pairs(
+            {
+                "SESSDATA": settings.bilibili_sessdata,
+                "bili_jct": settings.bilibili_bili_jct,
+                "DedeUserID": settings.bilibili_dedeuserid,
+            }
+        )
+
+    def _build_twitter_cookie_header(self) -> str | None:
+        direct_value = self._normalize_cookie_header(settings.twitter_cookies)
+        if direct_value:
+            return direct_value
+        return self._join_cookie_pairs(
+            {
+                "auth_token": settings.twitter_auth_token,
+                "ct0": settings.twitter_ct0,
+            }
+        )
+
+    def _join_cookie_pairs(self, cookie_map: dict[str, str | None]) -> str | None:
+        pairs = [
+            f"{key}={value.strip()}"
+            for key, value in cookie_map.items()
+            if isinstance(value, str) and value.strip()
+        ]
+        if not pairs:
+            return None
+        return "; ".join(pairs)
 
     def _normalize_cookie_header(self, value: str | None) -> str | None:
         if value is None:
             return None
         normalized = value.strip()
+        if normalized.lower().startswith("cookie:"):
+            normalized = normalized.split(":", 1)[1].strip()
         return normalized or None
 
     def _resolve_cookie_file(self, configured_path: str | None, platform: Platform | None) -> Path | None:
@@ -295,7 +352,7 @@ class DownloaderService:
         if not cookie_path.exists():
             platform_name = platform.value if platform is not None else "default"
             raise DownloaderUnavailableError(
-                f"{platform_name} cookies 文件不存在：{cookie_path}。请检查 backend/.env 中的 cookies 路径配置。"
+                f"{platform_name} cookies 文件不存在：{cookie_path}。请检查 backend/.env 中的配置。"
             )
         return cookie_path
 
@@ -319,49 +376,38 @@ class DownloaderService:
         hints: list[str] = []
 
         if platform == Platform.BILIBILI and "412" in message:
-            if not (settings.yt_dlp_bilibili_proxy or settings.yt_dlp_proxy):
-                hints.append(
-                    "当前 Bilibili 可能需要更换出口 IP，可在 backend/.env 配置 "
-                    "YT_DLP_BILIBILI_PROXY=socks5://127.0.0.1:1080"
-                )
+            if not (settings.bilibili_proxy or settings.proxy):
+                hints.append("可配置 BILIBILI_PROXY=socks5://your-proxy-host:1080")
             if not (
-                settings.yt_dlp_bilibili_cookies
-                or settings.yt_dlp_cookies
-                or settings.yt_dlp_bilibili_cookies_file
-                or settings.yt_dlp_cookies_file
+                settings.bilibili_cookies
+                or settings.bilibili_sessdata
+                or settings.cookies
+                or settings.bilibili_cookies_file
+                or settings.cookies_file
             ):
-                hints.append(
-                    "如该内容需要登录态，可配置 "
-                    "YT_DLP_BILIBILI_COOKIES=\"SESSDATA=...; bili_jct=...\""
-                )
+                hints.append("可配置 BILIBILI_SESSDATA 或 BILIBILI_COOKIES")
 
         if platform == Platform.YOUTUBE and "Sign in to confirm you" in message:
             if not (
-                settings.yt_dlp_youtube_cookies
-                or settings.yt_dlp_cookies
-                or settings.yt_dlp_youtube_cookies_file
-                or settings.yt_dlp_cookies_file
+                settings.youtube_cookies
+                or settings.cookies
+                or settings.youtube_cookies_file
+                or settings.cookies_file
             ):
-                hints.append(
-                    "当前 YouTube 大概率需要登录 cookies，可在 backend/.env 配置 "
-                    "YT_DLP_YOUTUBE_COOKIES=\"SID=...; HSID=...; SSID=...\""
-                )
+                hints.append("可配置 YOUTUBE_COOKIES，建议直接使用浏览器完整 Cookie 串")
 
         if platform == Platform.TWITTER and "No video could be found in this tweet" in message:
             if not (
-                settings.yt_dlp_twitter_cookies
-                or settings.yt_dlp_cookies
-                or settings.yt_dlp_twitter_cookies_file
-                or settings.yt_dlp_cookies_file
+                settings.twitter_cookies
+                or settings.twitter_auth_token
+                or settings.cookies
+                or settings.twitter_cookies_file
+                or settings.cookies_file
             ):
-                hints.append(
-                    "如果该推文登录后可见或为敏感内容，可在 backend/.env 配置 "
-                    "YT_DLP_TWITTER_COOKIES=\"auth_token=...; ct0=...\""
-                )
+                hints.append("可配置 TWITTER_AUTH_TOKEN，必要时补充 TWITTER_CT0")
 
         if not hints:
             return message
-
         return f"{message} 建议：{'；'.join(hints)}"
 
     def _build_progress_hook(
@@ -429,13 +475,11 @@ class DownloaderService:
 
         formats = info.get("formats") or []
         has_video_only = any(
-            item.get("vcodec") not in (None, "none")
-            and item.get("acodec") == "none"
+            item.get("vcodec") not in (None, "none") and item.get("acodec") == "none"
             for item in formats
         )
         has_audio_only = any(
-            item.get("acodec") not in (None, "none")
-            and item.get("vcodec") == "none"
+            item.get("acodec") not in (None, "none") and item.get("vcodec") == "none"
             for item in formats
         )
         return has_video_only and has_audio_only
@@ -576,16 +620,12 @@ class DownloaderService:
     def _normalize_headers(self, headers: Any) -> dict[str, str]:
         if not isinstance(headers, dict):
             return {}
-        return {
-            str(key): str(value)
-            for key, value in headers.items()
-            if value is not None
-        }
+        return {str(key): str(value) for key, value in headers.items() if value is not None}
 
     def _load_yt_dlp_module(self) -> Any:
         if not self._is_yt_dlp_available():
             raise DownloaderUnavailableError(
-                "未安装 yt-dlp。请先在后端运行环境执行 `pip install -r backend/requirements.txt`。"
+                "未安装 yt-dlp。请先在后端环境执行 `pip install -r backend/requirements.txt`。"
             )
         return importlib.import_module("yt_dlp")
 
