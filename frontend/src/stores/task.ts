@@ -7,6 +7,19 @@ import type { DeliveryMode, HealthResponse, TaskRecord, TaskResult, TaskStatus }
 
 const TERMINAL_STATUSES: TaskStatus[] = ['success', 'failed']
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object'
+}
+
+function isTaskRecord(value: unknown): value is TaskRecord {
+  return (
+    isObject(value) &&
+    typeof value.task_id === 'string' &&
+    typeof value.status === 'string' &&
+    typeof value.platform === 'string'
+  )
+}
+
 function extractErrorMessage(error: unknown): string {
   if (axios.isAxiosError(error)) {
     return error.response?.data?.detail ?? error.message
@@ -63,8 +76,12 @@ export const useTaskStore = defineStore('task', () => {
 
     try {
       const response = await createParseTask({ url, delivery_mode: deliveryMode })
+      if (!isObject(response) || !isTaskRecord(response.task)) {
+        throw new Error('解析接口返回格式不正确，请检查 /api/v1/parse 是否已正确反向代理到后端。')
+      }
+
       currentTask.value = response.task
-      systemNote.value = response.note
+      systemNote.value = typeof response.note === 'string' ? response.note : ''
       await loadHistory()
 
       if (!TERMINAL_STATUSES.includes(response.task.status)) {
@@ -84,6 +101,10 @@ export const useTaskStore = defineStore('task', () => {
     pollTimer = window.setInterval(async () => {
       try {
         const task = await fetchTask(taskId)
+        if (!isTaskRecord(task)) {
+          throw new Error('任务接口返回格式不正确，请检查 /api/v1/tasks 是否已正确反向代理到后端。')
+        }
+
         currentTask.value = task
 
         if (task.status === 'success') {

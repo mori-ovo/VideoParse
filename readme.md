@@ -43,6 +43,10 @@
   - 使用 `yt-dlp` 下载
   - 如有需要通过 `ffmpeg` 自动合流
   - 返回项目托管的 `download_url`
+- 已支持按平台注入 `yt-dlp` 运行参数：
+  - `Bilibili` 可单独配置 `SOCKS5` 代理
+  - `YouTube` 可单独配置 cookies
+  - `Twitter / X` 可单独配置 cookies
 - 健康检查接口
 - 历史任务接口
 - `temp/` 与 `cache/` 每 `6` 小时自动清理一次，清理阈值同样是 `6` 小时
@@ -381,6 +385,17 @@ npm run dev
 | `API_PUBLIC_ORIGIN` | `http://127.0.0.1:8000` | 生成对外可访问 URL 的基准地址 |
 | `CLEANUP_INTERVAL_HOURS` | `6` | 缓存清理周期 |
 | `CLEANUP_RETENTION_HOURS` | `6` | 缓存保留时间 |
+| `YT_DLP_PROXY` | 空 | 全局 `yt-dlp` 代理地址 |
+| `YT_DLP_COOKIES` | 空 | 全局 Cookie 字符串，直接写在 `.env` 中 |
+| `YT_DLP_COOKIES_FILE` | 空 | 全局 cookies 文件路径 |
+| `YT_DLP_USER_AGENT` | 空 | 全局 `yt-dlp` User-Agent |
+| `YT_DLP_BILIBILI_PROXY` | 空 | 仅 `Bilibili` 使用的代理，例如 `socks5://127.0.0.1:1080` |
+| `YT_DLP_BILIBILI_COOKIES` | 空 | 仅 `Bilibili` 使用的 Cookie 字符串 |
+| `YT_DLP_BILIBILI_COOKIES_FILE` | 空 | 仅 `Bilibili` 使用的 cookies 文件 |
+| `YT_DLP_YOUTUBE_COOKIES` | 空 | 仅 `YouTube` 使用的 Cookie 字符串 |
+| `YT_DLP_YOUTUBE_COOKIES_FILE` | 空 | 仅 `YouTube` 使用的 cookies 文件 |
+| `YT_DLP_TWITTER_COOKIES` | 空 | 仅 `Twitter / X` 使用的 Cookie 字符串 |
+| `YT_DLP_TWITTER_COOKIES_FILE` | 空 | 仅 `Twitter / X` 使用的 cookies 文件 |
 | `YT_DLP_DOWNLOAD_FORMAT` | `best[height<=1080]/bestvideo*[height<=1080]+bestaudio/best` | 下载模式的默认格式策略 |
 | `YT_DLP_MERGE_OUTPUT_FORMAT` | `mp4` | 合流输出格式 |
 | `FFMPEG_LOCATION` | 空 | `ffmpeg` 可执行文件路径，可选 |
@@ -402,6 +417,18 @@ API_PUBLIC_ORIGIN=https://your-domain-or-public-ip
 
 如果这里还是本地地址，那么返回给用户的 `proxy_url`、`redirect_url`、`download_url` 都会指向错误位置。
 
+按平台定制的一个典型示例：
+
+```env
+FRONTEND_ORIGIN=https://moriparse.space
+API_PUBLIC_ORIGIN=https://moriparse.space
+
+YT_DLP_BILIBILI_PROXY=socks5://127.0.0.1:1080
+YT_DLP_BILIBILI_COOKIES="SESSDATA=...; bili_jct=...; DedeUserID=..."
+YT_DLP_YOUTUBE_COOKIES="SID=...; HSID=...; SSID=..."
+YT_DLP_TWITTER_COOKIES="auth_token=...; ct0=..."
+```
+
 ## 15. 当前限制
 
 当前版本更偏向“小团队内部可用骨架”，还存在这些限制：
@@ -410,7 +437,7 @@ API_PUBLIC_ORIGIN=https://your-domain-or-public-ip
 - 还没有接入数据库和 Redis
 - 还没有真正的异步任务队列
 - `output/` 没有独立生命周期管理
-- 部分平台可能需要 cookies、登录态、地区能力
+- 部分平台即使配置了 cookies，仍可能受到 IP 风控、地区或账号可见性限制
 - 不处理 DRM、付费绕过或受限内容破解
 
 ## 16. 后续迭代建议
@@ -420,7 +447,7 @@ API_PUBLIC_ORIGIN=https://your-domain-or-public-ip
 1. 把任务存储迁移到数据库
 2. 引入 Redis / 队列系统处理异步任务
 3. 为下载成品增加生命周期清理策略
-4. 增加 cookies / 登录态支持
+4. 为不同平台补充更细的 cookies、代理和 extractor 参数策略
 5. 根据不同平台做更细的直链筛选策略
 6. 为生产环境补充 Nginx、进程守护与日志采集
 

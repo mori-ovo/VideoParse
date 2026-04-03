@@ -21,6 +21,17 @@ class Settings(BaseSettings):
 
     cleanup_interval_hours: int = 6
     cleanup_retention_hours: int = 6
+    yt_dlp_proxy: str | None = None
+    yt_dlp_cookies: str | None = None
+    yt_dlp_cookies_file: str | None = None
+    yt_dlp_user_agent: str | None = None
+    yt_dlp_bilibili_proxy: str | None = None
+    yt_dlp_bilibili_cookies: str | None = None
+    yt_dlp_bilibili_cookies_file: str | None = None
+    yt_dlp_youtube_cookies: str | None = None
+    yt_dlp_youtube_cookies_file: str | None = None
+    yt_dlp_twitter_cookies: str | None = None
+    yt_dlp_twitter_cookies_file: str | None = None
     yt_dlp_download_format: str = "best[height<=1080]/bestvideo*[height<=1080]+bestaudio/best"
     yt_dlp_merge_output_format: str = "mp4"
     ffmpeg_location: str | None = None

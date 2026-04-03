@@ -5,8 +5,10 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from app.core.config import settings
+from app.schemas.task import Platform
 
 
 class DownloaderUnavailableError(RuntimeError):
@@ -69,6 +71,15 @@ class DownloadedMedia:
     extractor: str | None
 
 
+@dataclass(frozen=True)
+class PlatformRequestOptions:
+    platform: Platform | None
+    proxy: str | None
+    cookie_header: str | None
+    cookies_file: Path | None
+    user_agent: str | None
+
+
 class YtDlpLogger:
     def __init__(self) -> None:
         self.errors: list[str] = []
@@ -123,11 +134,13 @@ class DownloaderService:
     def _extract_metadata_sync(self, url: str) -> ExtractedMedia:
         yt_dlp = self._load_yt_dlp_module()
         logger = YtDlpLogger()
+        request_options = self._resolve_platform_request_options(url)
         options = self._build_options(
             task_id="metadata",
             logger=logger,
             progress_callback=None,
             download=False,
+            request_options=request_options,
         )
 
         try:
@@ -135,7 +148,7 @@ class DownloaderService:
                 info = ydl.extract_info(url, download=False)
         except Exception as exc:  # noqa: BLE001
             message = logger.errors[-1] if logger.errors else str(exc)
-            raise DownloaderExecutionError(message) from exc
+            raise DownloaderExecutionError(self._build_guided_error_message(url, message)) from exc
 
         normalized = self._normalize_info(info)
         return self._build_extracted_media(normalized)
@@ -153,11 +166,13 @@ class DownloaderService:
         task_temp_dir.mkdir(parents=True, exist_ok=True)
 
         logger = YtDlpLogger()
+        request_options = self._resolve_platform_request_options(url)
         options = self._build_options(
             task_id=task_id,
             logger=logger,
             progress_callback=progress_callback,
             download=True,
+            request_options=request_options,
         )
 
         try:
@@ -165,7 +180,7 @@ class DownloaderService:
                 info = ydl.extract_info(url, download=True)
         except Exception as exc:  # noqa: BLE001
             message = logger.errors[-1] if logger.errors else str(exc)
-            raise DownloaderExecutionError(message) from exc
+            raise DownloaderExecutionError(self._build_guided_error_message(url, message)) from exc
 
         normalized = self._normalize_info(info)
         media_path = self._find_downloaded_media_file(task_output_dir)
@@ -192,6 +207,7 @@ class DownloaderService:
         logger: YtDlpLogger,
         progress_callback: Callable[[DownloadProgressEvent], None] | None,
         download: bool,
+        request_options: PlatformRequestOptions,
     ) -> dict[str, Any]:
         output_dir = settings.output_dir / task_id
         temp_dir = settings.temp_dir / task_id
@@ -215,6 +231,20 @@ class DownloaderService:
         if download:
             options["format"] = settings.yt_dlp_download_format
 
+        if request_options.proxy:
+            options["proxy"] = request_options.proxy
+
+        http_headers: dict[str, str] = {}
+        if request_options.user_agent:
+            http_headers["User-Agent"] = request_options.user_agent
+        if request_options.cookie_header:
+            http_headers["Cookie"] = request_options.cookie_header
+        if http_headers:
+            options["http_headers"] = http_headers
+
+        if request_options.cookies_file is not None:
+            options["cookiefile"] = str(request_options.cookies_file)
+
         ffmpeg_location = self._resolve_ffmpeg_location()
         if ffmpeg_location is not None:
             options["ffmpeg_location"] = ffmpeg_location
@@ -223,6 +253,116 @@ class DownloaderService:
             options["progress_hooks"] = [self._build_progress_hook(progress_callback)]
 
         return options
+
+    def _resolve_platform_request_options(self, url: str) -> PlatformRequestOptions:
+        platform = self._detect_platform(url)
+        proxy = settings.yt_dlp_proxy
+        cookie_header = self._normalize_cookie_header(settings.yt_dlp_cookies)
+        cookies_file = settings.yt_dlp_cookies_file
+
+        if platform == Platform.BILIBILI:
+            proxy = settings.yt_dlp_bilibili_proxy or proxy
+            cookie_header = self._normalize_cookie_header(settings.yt_dlp_bilibili_cookies) or cookie_header
+            cookies_file = settings.yt_dlp_bilibili_cookies_file or cookies_file
+        elif platform == Platform.YOUTUBE:
+            cookie_header = self._normalize_cookie_header(settings.yt_dlp_youtube_cookies) or cookie_header
+            cookies_file = settings.yt_dlp_youtube_cookies_file or cookies_file
+        elif platform == Platform.TWITTER:
+            cookie_header = self._normalize_cookie_header(settings.yt_dlp_twitter_cookies) or cookie_header
+            cookies_file = settings.yt_dlp_twitter_cookies_file or cookies_file
+
+        resolved_cookie_file = None if cookie_header else self._resolve_cookie_file(cookies_file, platform)
+
+        return PlatformRequestOptions(
+            platform=platform,
+            proxy=proxy,
+            cookie_header=cookie_header,
+            cookies_file=resolved_cookie_file,
+            user_agent=settings.yt_dlp_user_agent,
+        )
+
+    def _normalize_cookie_header(self, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    def _resolve_cookie_file(self, configured_path: str | None, platform: Platform | None) -> Path | None:
+        if not configured_path:
+            return None
+
+        cookie_path = Path(configured_path).expanduser()
+        if not cookie_path.exists():
+            platform_name = platform.value if platform is not None else "default"
+            raise DownloaderUnavailableError(
+                f"{platform_name} cookies 文件不存在：{cookie_path}。请检查 backend/.env 中的 cookies 路径配置。"
+            )
+        return cookie_path
+
+    def _detect_platform(self, url: str) -> Platform | None:
+        host = urlparse(url).netloc.lower()
+        if "bilibili.com" in host or "b23.tv" in host:
+            return Platform.BILIBILI
+        if "douyin.com" in host or "iesdouyin.com" in host:
+            return Platform.DOUYIN
+        if "twitter.com" in host or "x.com" in host:
+            return Platform.TWITTER
+        if "youtube.com" in host or "youtu.be" in host:
+            return Platform.YOUTUBE
+        if "reddit.com" in host or "redd.it" in host:
+            return Platform.REDDIT
+        return None
+
+    def _build_guided_error_message(self, url: str, raw_message: str) -> str:
+        message = raw_message.strip()
+        platform = self._detect_platform(url)
+        hints: list[str] = []
+
+        if platform == Platform.BILIBILI and "412" in message:
+            if not (settings.yt_dlp_bilibili_proxy or settings.yt_dlp_proxy):
+                hints.append(
+                    "当前 Bilibili 可能需要更换出口 IP，可在 backend/.env 配置 "
+                    "YT_DLP_BILIBILI_PROXY=socks5://127.0.0.1:1080"
+                )
+            if not (
+                settings.yt_dlp_bilibili_cookies
+                or settings.yt_dlp_cookies
+                or settings.yt_dlp_bilibili_cookies_file
+                or settings.yt_dlp_cookies_file
+            ):
+                hints.append(
+                    "如该内容需要登录态，可配置 "
+                    "YT_DLP_BILIBILI_COOKIES=\"SESSDATA=...; bili_jct=...\""
+                )
+
+        if platform == Platform.YOUTUBE and "Sign in to confirm you" in message:
+            if not (
+                settings.yt_dlp_youtube_cookies
+                or settings.yt_dlp_cookies
+                or settings.yt_dlp_youtube_cookies_file
+                or settings.yt_dlp_cookies_file
+            ):
+                hints.append(
+                    "当前 YouTube 大概率需要登录 cookies，可在 backend/.env 配置 "
+                    "YT_DLP_YOUTUBE_COOKIES=\"SID=...; HSID=...; SSID=...\""
+                )
+
+        if platform == Platform.TWITTER and "No video could be found in this tweet" in message:
+            if not (
+                settings.yt_dlp_twitter_cookies
+                or settings.yt_dlp_cookies
+                or settings.yt_dlp_twitter_cookies_file
+                or settings.yt_dlp_cookies_file
+            ):
+                hints.append(
+                    "如果该推文登录后可见或为敏感内容，可在 backend/.env 配置 "
+                    "YT_DLP_TWITTER_COOKIES=\"auth_token=...; ct0=...\""
+                )
+
+        if not hints:
+            return message
+
+        return f"{message} 建议：{'；'.join(hints)}"
 
     def _build_progress_hook(
         self,
