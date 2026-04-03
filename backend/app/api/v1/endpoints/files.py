@@ -23,6 +23,22 @@ async def download_file(file_id: str) -> FileResponse:
     )
 
 
+@router.get("/{file_id}.{extension}", summary="播放或复制短文件直链")
+async def stream_file_short(file_id: str, extension: str) -> FileResponse:
+    stored_file = await storage_service.get_file(file_id)
+    if stored_file is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="文件不存在或已被清理。",
+        )
+
+    return FileResponse(
+        path=stored_file.path,
+        media_type=stored_file.content_type,
+        content_disposition_type="inline",
+    )
+
+
 @router.get("/{file_id}", summary="获取可播放文件地址")
 async def open_file(file_id: str) -> FileResponse:
     stored_file = await storage_service.get_file(file_id)

@@ -443,20 +443,32 @@ class TaskService:
 
     def _migrate_task_result_links(self, task: TaskRecord) -> TaskRecord:
         result = task.result
-        if result is None or result.result_type != ResultType.DIRECT:
-            return task
-        if not result.redirect_url:
-            return task
-        if result.play_url == result.redirect_url and result.download_url == result.redirect_url:
+        if result is None:
             return task
 
-        migrated_result = result.model_copy(
-            update={
-                "play_url": result.redirect_url,
-                "download_url": result.redirect_url,
-            }
-        )
-        return task.model_copy(update={"result": migrated_result})
+        if result.result_type == ResultType.DIRECT:
+            if not result.redirect_url:
+                return task
+            if result.play_url == result.redirect_url and result.download_url == result.redirect_url:
+                return task
+
+            migrated_result = result.model_copy(
+                update={
+                    "play_url": result.redirect_url,
+                    "download_url": result.redirect_url,
+                }
+            )
+            return task.model_copy(update={"result": migrated_result})
+
+        if result.result_type == ResultType.DOWNLOAD and result.file_id and result.file_name:
+            expected_play_url = storage_service.build_stream_url(result.file_id, result.file_name)
+            if result.play_url == expected_play_url:
+                return task
+
+            migrated_result = result.model_copy(update={"play_url": expected_play_url})
+            return task.model_copy(update={"result": migrated_result})
+
+        return task
 
     def detect_platform(self, source_url: str) -> Platform:
         for platform, pattern in PLATFORM_PATTERNS:

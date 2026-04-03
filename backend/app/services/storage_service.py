@@ -6,10 +6,11 @@ import string
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from app.core.config import settings
 from app.schemas.task import ResultType, TaskRecord, TaskResult
-from app.utils.path import slugify_filename
+from app.utils.path import build_public_file_name, slugify_filename
 
 
 @dataclass
@@ -67,7 +68,7 @@ class LocalStorageService:
             file_id=file_id,
             file_name=file_name,
             content_type=stored_file.content_type,
-            play_url=f"{settings.api_public_origin}{settings.api_v1_prefix}/files/{file_id}",
+            play_url=self.build_stream_url(file_id, file_name),
             download_url=f"{settings.api_public_origin}{settings.api_v1_prefix}/files/{file_id}/download",
             placeholder=True,
             created_at=created_at,
@@ -78,9 +79,10 @@ class LocalStorageService:
         file_id = self._generate_file_id()
         created_at = datetime.now(timezone.utc)
         content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        public_file_name = build_public_file_name(file_path.name)
         stored_file = StoredFile(
             file_id=file_id,
-            file_name=file_path.name,
+            file_name=public_file_name,
             path=file_path,
             content_type=content_type,
             created_at=created_at,
@@ -99,7 +101,7 @@ class LocalStorageService:
             file_id=file_id,
             file_name=stored_file.file_name,
             content_type=stored_file.content_type,
-            play_url=f"{settings.api_public_origin}{settings.api_v1_prefix}/files/{file_id}",
+            play_url=self.build_stream_url(file_id, stored_file.file_name),
             download_url=f"{settings.api_public_origin}{settings.api_v1_prefix}/files/{file_id}/download",
             placeholder=False,
             created_at=created_at,
@@ -154,6 +156,12 @@ class LocalStorageService:
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    def build_stream_url(self, file_id: str, file_name: str) -> str:
+        suffix = Path(file_name).suffix.lower()
+        public_file_name = f"{file_id}{suffix}" if suffix else file_id
+        safe_file_name = quote(public_file_name, safe="")
+        return f"{settings.api_public_origin}{settings.api_v1_prefix}/files/{safe_file_name}"
 
     def _generate_file_id(self) -> str:
         alphabet = string.ascii_lowercase + string.digits

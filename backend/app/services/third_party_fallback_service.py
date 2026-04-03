@@ -23,28 +23,56 @@ class ThirdPartyMedia:
 
 
 class ThirdPartyFallbackService:
-    _twitter_status_pattern = re.compile(r"/status/(\d+)")
+    _twitter_status_pattern = re.compile(r"/(?P<screen_name>[^/?#]+)/status/(?P<status_id>\d+)")
     _twitter_status_api = "https://api.fxtwitter.com/i/status/{status_id}"
+    _twitter_status_api_with_name = "https://api.fxtwitter.com/{screen_name}/status/{status_id}"
     _iiilab_extract_api = "https://service.iiilab.com/iiilab/extract"
     _iiilab_secret = "2HT8gjE3xL"
 
     def resolve_twitter_media(self, url: str) -> ThirdPartyMedia | None:
-        status_id = self._extract_twitter_status_id(url)
-        if status_id is None:
+        status_reference = self._extract_twitter_status_reference(url)
+        if status_reference is None:
             return None
 
-        payload = self._fetch_json(self._twitter_status_api.format(status_id=status_id))
-        return self._parse_fxtwitter_payload(payload, status_id)
+        screen_name, status_id = status_reference
+        last_error: ThirdPartyFallbackError | None = None
+
+        for api_url in self._build_twitter_status_api_candidates(screen_name, status_id):
+            try:
+                payload = self._fetch_json(api_url)
+            except ThirdPartyFallbackError as exc:
+                last_error = exc
+                continue
+
+            media = self._parse_fxtwitter_payload(payload, status_id)
+            if media is not None:
+                return media
+
+        if last_error is not None:
+            raise last_error
+        return None
 
     def resolve_youtube_media(self, url: str) -> ThirdPartyMedia | None:
         payload = self._fetch_iiilab_payload(url=url, site="youtube")
         return self._parse_iiilab_youtube_payload(payload, url)
 
-    def _extract_twitter_status_id(self, url: str) -> str | None:
+    def _extract_twitter_status_reference(self, url: str) -> tuple[str | None, str] | None:
         match = self._twitter_status_pattern.search(url)
         if match is None:
             return None
-        return match.group(1)
+        screen_name = match.group("screen_name")
+        if screen_name == "i":
+            screen_name = None
+        return screen_name, match.group("status_id")
+
+    def _build_twitter_status_api_candidates(self, screen_name: str | None, status_id: str) -> list[str]:
+        candidates = [self._twitter_status_api.format(status_id=status_id)]
+        if screen_name:
+            candidates.insert(
+                0,
+                self._twitter_status_api_with_name.format(screen_name=screen_name, status_id=status_id),
+            )
+        return candidates
 
     def _fetch_json(self, url: str) -> dict[str, object]:
         request = Request(

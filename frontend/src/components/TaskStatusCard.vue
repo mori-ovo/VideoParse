@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 
 import type { TaskRecord, TaskResult } from '../types/task'
 
@@ -8,44 +8,95 @@ const props = defineProps<{
   result: TaskResult | null
 }>()
 
-const defaultCopyLabel = '复制直链'
+const defaultCopyLabel = '复制链接'
 const copyFeedback = ref(defaultCopyLabel)
 
-function formatDate(value: string): string {
-  return new Date(value).toLocaleString('zh-CN')
+let copyResetTimer: number | null = null
+
+function decodeHtmlEntities(value: string): string {
+  const textarea = document.createElement('textarea')
+  textarea.innerHTML = value
+  return textarea.value
 }
 
-function formatDuration(seconds: number | null | undefined): string {
-  if (!seconds) {
-    return '-'
-  }
+function buildPublicFileName(fileName: string): string {
+  const normalized = decodeHtmlEntities(fileName).trim()
+  const lastDotIndex = normalized.lastIndexOf('.')
+  const hasExtension = lastDotIndex > 0 && lastDotIndex < normalized.length - 1
+  const stem = hasExtension ? normalized.slice(0, lastDotIndex) : normalized
+  const extension = hasExtension ? normalized.slice(lastDotIndex).toLowerCase() : '.mp4'
 
-  const hour = Math.floor(seconds / 3600)
-  const minute = Math.floor((seconds % 3600) / 60)
-  const second = seconds % 60
+  const publicStem = stem
+    .replace(/[^0-9A-Za-z\u4e00-\u9fff]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 120 - extension.length)
 
-  if (hour > 0) {
-    return `${hour}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`
-  }
-
-  return `${minute}:${String(second).padStart(2, '0')}`
+  return `${publicStem || 'video'}${extension}`
 }
 
-function formatFileSize(bytes: number | null | undefined): string {
-  if (!bytes || bytes <= 0) {
-    return '-'
+function buildShortPublicFileName(result: TaskResult): string | null {
+  if (!result.file_id) {
+    return null
   }
 
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let size = bytes
-  let unitIndex = 0
+  const sourceName = result.file_name?.trim() || ''
+  const lastDotIndex = sourceName.lastIndexOf('.')
+  const hasExtension = lastDotIndex > 0 && lastDotIndex < sourceName.length - 1
+  const extension = hasExtension ? sourceName.slice(lastDotIndex).toLowerCase() : '.mp4'
+  return `${result.file_id}${extension}`
+}
 
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024
-    unitIndex += 1
+function buildFilePlayUrl(result: TaskResult): string | null {
+  if (!result.file_id) {
+    return null
   }
 
-  return `${size.toFixed(size >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
+  const seedUrl = result.play_url ?? result.download_url
+  if (!seedUrl) {
+    return null
+  }
+
+  try {
+    const publicFileName = buildShortPublicFileName(result)
+    if (!publicFileName) {
+      return null
+    }
+
+    const resolved = new URL(seedUrl, window.location.origin)
+    const shortPath = `/files/${encodeURIComponent(publicFileName)}`
+
+    if (resolved.pathname === shortPath) {
+      return resolved.toString()
+    }
+
+    if (resolved.pathname.endsWith('/download')) {
+      resolved.pathname = shortPath
+      return resolved.toString()
+    }
+
+    if (resolved.pathname.startsWith(`/files/${result.file_id}`)) {
+      resolved.pathname = shortPath
+      return resolved.toString()
+    }
+  } catch {
+    return null
+  }
+
+  return null
+}
+
+function buildDownloadName(): string | undefined {
+  if (props.result?.file_name) {
+    return buildPublicFileName(props.result.file_name)
+  }
+
+  const rawTitle = props.task?.title?.trim()
+  if (!rawTitle) {
+    return undefined
+  }
+
+  return buildPublicFileName(rawTitle)
 }
 
 function fallbackCopyText(value: string): boolean {
@@ -73,8 +124,14 @@ function fallbackCopyText(value: string): boolean {
 
 function setCopyFeedback(value: string): void {
   copyFeedback.value = value
-  window.setTimeout(() => {
+
+  if (copyResetTimer !== null) {
+    window.clearTimeout(copyResetTimer)
+  }
+
+  copyResetTimer = window.setTimeout(() => {
     copyFeedback.value = defaultCopyLabel
+    copyResetTimer = null
   }, 1500)
 }
 
@@ -84,7 +141,11 @@ const copyUrl = computed(() => {
     return null
   }
 
-  return result.play_url ?? result.proxy_url ?? result.download_url ?? null
+  if (result.file_id) {
+    return buildFilePlayUrl(result) ?? result.play_url ?? result.download_url ?? null
+  }
+
+  return result.direct_url ?? result.play_url ?? result.proxy_url ?? result.download_url ?? null
 })
 
 const downloadUrl = computed(() => {
@@ -93,45 +154,19 @@ const downloadUrl = computed(() => {
     return null
   }
 
+  if (!result.file_id) {
+    return result.proxy_url ?? result.download_url ?? result.play_url ?? null
+  }
+
   return result.download_url ?? result.play_url ?? result.proxy_url ?? null
 })
 
-const linkSummary = computed(() => {
-  const result = props.result
-  if (!result) {
-    return ''
-  }
-
-  if (result.play_url && result.download_url) {
-    return '复制直链会复制本站播放地址；下载视频会使用本站下载地址。'
-  }
-
-  if (result.play_url) {
-    return '当前结果已经生成本站播放链接，适合复制给播放器或外部应用。'
-  }
-
-  if (result.video_proxy_url || result.audio_proxy_url) {
-    return '当前源站仍是分离流。只有源站本身存在单文件流，或后端合流完成后，才能得到单文件视频地址。'
-  }
-
-  return ''
+const downloadName = computed(() => {
+  return buildDownloadName()
 })
 
-const streamSummary = computed(() => {
-  const task = props.task
-  if (!task) {
-    return '-'
-  }
-
-  if (task.direct_playable) {
-    return '存在单文件直链'
-  }
-
-  if (task.requires_merge) {
-    return '检测到音视频分离流'
-  }
-
-  return '标准媒体流'
+const resultTitle = computed(() => {
+  return decodeHtmlEntities(props.task?.title?.trim() || '链接已生成')
 })
 
 async function handleCopy(): Promise<void> {
@@ -156,91 +191,37 @@ async function handleCopy(): Promise<void> {
 
   setCopyFeedback('复制失败')
 }
+
+onBeforeUnmount(() => {
+  if (copyResetTimer !== null) {
+    window.clearTimeout(copyResetTimer)
+  }
+})
 </script>
 
 <template>
-  <section class="panel task-panel">
-    <div class="panel-heading">
-      <p class="eyebrow">Task Status</p>
-      <h2>当前任务</h2>
+  <section class="glass-card result-panel">
+    <div class="result-copy">
+      <h2 class="status-title status-title-compact">{{ resultTitle }}</h2>
     </div>
 
-    <div v-if="task" class="task-body">
-      <div class="task-meta">
-        <span class="status-badge" :data-status="task.status">{{ task.status }}</span>
-        <span>{{ task.platform }}</span>
-        <span>自动模式</span>
-        <span>{{ streamSummary }}</span>
-      </div>
-
-      <p class="task-title">{{ task.title }}</p>
-      <p class="task-message">{{ task.message }}</p>
-
-      <div class="progress-track">
-        <div class="progress-fill" :style="{ width: `${task.progress}%` }"></div>
-      </div>
-
-      <dl class="task-grid">
-        <div>
-          <dt>任务 ID</dt>
-          <dd>{{ task.task_id }}</dd>
-        </div>
-        <div>
-          <dt>创建时间</dt>
-          <dd>{{ formatDate(task.created_at) }}</dd>
-        </div>
-        <div>
-          <dt>原始链接</dt>
-          <dd class="truncate">{{ task.source_url }}</dd>
-        </div>
-        <div>
-          <dt>更新时间</dt>
-          <dd>{{ formatDate(task.updated_at) }}</dd>
-        </div>
-        <div>
-          <dt>发布者</dt>
-          <dd>{{ task.uploader || '-' }}</dd>
-        </div>
-        <div>
-          <dt>时长</dt>
-          <dd>{{ formatDuration(task.duration) }}</dd>
-        </div>
-        <div>
-          <dt>解析器</dt>
-          <dd>{{ task.extractor || '-' }}</dd>
-        </div>
-        <div>
-          <dt>文件大小</dt>
-          <dd>{{ formatFileSize(result?.file_size) }}</dd>
-        </div>
-        <div>
-          <dt>单文件直链</dt>
-          <dd>{{ task.direct_playable ? '是' : '否' }}</dd>
-        </div>
-      </dl>
-
-      <div v-if="result" class="result-links">
-        <button class="download-link" type="button" :disabled="!copyUrl" @click="handleCopy">
-          {{ copyFeedback }}
-        </button>
-        <a
-          v-if="downloadUrl"
-          class="download-link secondary-link"
-          :href="downloadUrl"
-          download
-          target="_blank"
-          rel="noreferrer"
-        >
-          下载视频
-        </a>
-      </div>
-
-      <p v-if="copyUrl" class="url-preview">{{ copyUrl }}</p>
-      <p v-if="linkSummary" class="task-message">{{ linkSummary }}</p>
-      <p v-if="result?.expires_note" class="task-message">{{ result.expires_note }}</p>
-      <p v-if="task.error_message" class="task-message task-error">{{ task.error_message }}</p>
+    <div class="action-row">
+      <button class="action-button action-primary" type="button" :disabled="!copyUrl" @click="handleCopy">
+        {{ copyFeedback }}
+      </button>
+      <a
+        v-if="downloadUrl"
+        class="action-button action-secondary"
+        :href="downloadUrl"
+        :download="downloadName"
+        :target="result?.file_id ? undefined : '_blank'"
+        :rel="result?.file_id ? undefined : 'noreferrer'"
+      >
+        下载视频
+      </a>
+      <button v-else class="action-button action-secondary" type="button" disabled>
+        下载视频
+      </button>
     </div>
-
-    <p v-else class="empty-copy">提交一个链接后，任务状态会在这里实时刷新。</p>
   </section>
 </template>

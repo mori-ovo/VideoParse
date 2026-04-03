@@ -2,8 +2,8 @@ import axios from 'axios'
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
-import { createParseTask, fetchHealth, fetchHistory, fetchTask, fetchTaskResult } from '../api/parse'
-import type { HealthResponse, TaskRecord, TaskResult, TaskStatus } from '../types/task'
+import { createParseTask, fetchTask, fetchTaskResult } from '../api/parse'
+import type { ParseAcceptedResponse, TaskRecord, TaskResult, TaskStatus } from '../types/task'
 
 const TERMINAL_STATUSES: TaskStatus[] = ['success', 'failed']
 
@@ -35,10 +35,7 @@ function extractErrorMessage(error: unknown): string {
 export const useTaskStore = defineStore('task', () => {
   const currentTask = ref<TaskRecord | null>(null)
   const currentResult = ref<TaskResult | null>(null)
-  const history = ref<TaskRecord[]>([])
-  const health = ref<HealthResponse | null>(null)
   const errorMessage = ref('')
-  const systemNote = ref('')
   const submitting = ref(false)
   const polling = ref(false)
 
@@ -53,20 +50,34 @@ export const useTaskStore = defineStore('task', () => {
     polling.value = false
   }
 
-  async function loadHealth(): Promise<void> {
-    health.value = await fetchHealth()
-  }
+  async function loadTaskState(taskId: string): Promise<void> {
+    const task = await fetchTask(taskId)
+    if (!isTaskRecord(task)) {
+      throw new Error('任务接口返回格式不正确。')
+    }
 
-  async function loadHistory(): Promise<void> {
-    history.value = await fetchHistory()
+    currentTask.value = task
+
+    if (task.status === 'success') {
+      currentResult.value = await fetchTaskResult(taskId)
+      stopPolling()
+      return
+    }
+
+    if (task.status === 'failed') {
+      currentResult.value = null
+      stopPolling()
+      return
+    }
+
+    currentResult.value = null
+    startPolling(taskId)
   }
 
   async function bootstrap(): Promise<void> {
-    try {
-      await Promise.all([loadHealth(), loadHistory()])
-    } catch (error) {
-      errorMessage.value = extractErrorMessage(error)
-    }
+    currentTask.value = null
+    currentResult.value = null
+    errorMessage.value = ''
   }
 
   async function submitUrl(url: string): Promise<void> {
@@ -77,15 +88,15 @@ export const useTaskStore = defineStore('task', () => {
 
     try {
       const response = await createParseTask({ url, delivery_mode: 'auto' })
-      if (!isObject(response) || !isTaskRecord(response.task)) {
-        throw new Error('解析接口返回格式不正确，请检查 /api/v1/parse 是否正确反向代理到后端。')
+      if (!isParseAcceptedResponse(response)) {
+        throw new Error('解析接口返回格式不正确，请检查 /api/v1/parse 是否已正确指向后端。')
       }
 
       currentTask.value = response.task
-      systemNote.value = typeof response.note === 'string' ? response.note : ''
-      await loadHistory()
 
-      if (!TERMINAL_STATUSES.includes(response.task.status)) {
+      if (TERMINAL_STATUSES.includes(response.task.status)) {
+        await loadTaskState(response.task.task_id)
+      } else {
         startPolling(response.task.task_id)
       }
     } catch (error) {
@@ -101,21 +112,7 @@ export const useTaskStore = defineStore('task', () => {
 
     pollTimer = window.setInterval(async () => {
       try {
-        const task = await fetchTask(taskId)
-        if (!isTaskRecord(task)) {
-          throw new Error('任务接口返回格式不正确，请检查 /api/v1/tasks 是否正确反向代理到后端。')
-        }
-
-        currentTask.value = task
-
-        if (task.status === 'success') {
-          currentResult.value = await fetchTaskResult(taskId)
-          await loadHistory()
-          stopPolling()
-        } else if (task.status === 'failed') {
-          await loadHistory()
-          stopPolling()
-        }
+        await loadTaskState(taskId)
       } catch (error) {
         errorMessage.value = extractErrorMessage(error)
         stopPolling()
@@ -126,10 +123,7 @@ export const useTaskStore = defineStore('task', () => {
   return {
     currentTask,
     currentResult,
-    history,
-    health,
     errorMessage,
-    systemNote,
     submitting,
     polling,
     bootstrap,
@@ -137,3 +131,7 @@ export const useTaskStore = defineStore('task', () => {
     stopPolling,
   }
 })
+
+function isParseAcceptedResponse(value: unknown): value is ParseAcceptedResponse {
+  return isObject(value) && isTaskRecord(value.task)
+}
