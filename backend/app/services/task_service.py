@@ -108,6 +108,21 @@ class TaskService:
             if task is None:
                 return
 
+            if (
+                task.delivery_mode == DeliveryMode.DOWNLOAD
+                and metadata.direct_url
+                and metadata.extractor in {"iiilab", "fxtwitter"}
+            ):
+                result = self._build_direct_result(task_id=task_id, metadata=metadata)
+                await self._update_task(
+                    task_id=task_id,
+                    status_value=TaskStatus.SUCCESS,
+                    progress=100,
+                    message="已通过第三方兜底生成本站视频链接。你现在可以复制直链，或直接下载视频。",
+                    result=result,
+                )
+                return
+
             if task.delivery_mode == DeliveryMode.DIRECT:
                 result = self._build_direct_result(task_id=task_id, metadata=metadata)
                 await self._update_task(

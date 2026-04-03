@@ -146,6 +146,15 @@ class DownloaderService:
         )
 
     def _extract_metadata_sync(self, url: str) -> ExtractedMedia:
+        platform = self._detect_platform(url)
+
+        # For YouTube, a third-party handoff is currently the most reliable path on
+        # low-resource servers that often hit bot checks or JS runtime issues.
+        if platform == Platform.YOUTUBE:
+            fallback_media = self._resolve_third_party_metadata(url)
+            if fallback_media is not None:
+                return fallback_media
+
         try:
             normalized = self._extract_info_sync(
                 task_id="metadata",
@@ -557,13 +566,15 @@ class DownloaderService:
 
     def _resolve_third_party_metadata(self, url: str) -> ExtractedMedia | None:
         platform = self._detect_platform(url)
-        if platform != Platform.TWITTER:
-            return None
-
         try:
-            media = third_party_fallback_service.resolve_twitter_media(url)
+            if platform == Platform.TWITTER:
+                media = third_party_fallback_service.resolve_twitter_media(url)
+            elif platform == Platform.YOUTUBE:
+                media = third_party_fallback_service.resolve_youtube_media(url)
+            else:
+                return None
         except ThirdPartyFallbackError as exc:
-            logger.warning("twitter third-party fallback failed: %s", exc)
+            logger.warning("%s third-party fallback failed: %s", platform.value if platform else "unknown", exc)
             return None
 
         if media is None:
