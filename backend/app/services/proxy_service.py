@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import HTTPException, Request, status
@@ -33,6 +34,12 @@ PASS_RESPONSE_HEADERS = {
     "expires",
     "last-modified",
 }
+
+DEFAULT_PROXY_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/135.0.0.0 Safari/537.36"
+)
 
 
 @dataclass
@@ -133,11 +140,15 @@ class ProxyService:
         force_refresh: bool,
     ) -> httpx.Response:
         target = await self._resolve_proxy_target(task_id=task_id, kind=kind, force_refresh=force_refresh)
+        task = await task_service.get_task(task_id)
         upstream_headers: dict[str, str] = dict(target.headers)
         if "range" in request.headers:
             upstream_headers["Range"] = request.headers["range"]
-        if "User-Agent" not in upstream_headers and "user-agent" not in upstream_headers:
-            upstream_headers["User-Agent"] = "VideoParseProxy/0.1"
+        self._apply_default_upstream_headers(
+            headers=upstream_headers,
+            request=request,
+            source_url=task.source_url if task is not None else None,
+        )
 
         method = request.method.upper()
         try:
@@ -148,6 +159,38 @@ class ProxyService:
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"代理上游媒体失败：{exc}",
             ) from exc
+
+    def _apply_default_upstream_headers(
+        self,
+        headers: dict[str, str],
+        request: Request,
+        source_url: str | None,
+    ) -> None:
+        if not self._has_header(headers, "User-Agent"):
+            headers["User-Agent"] = settings.user_agent or DEFAULT_PROXY_USER_AGENT
+
+        if not self._has_header(headers, "Accept"):
+            headers["Accept"] = request.headers.get("accept") or "*/*"
+
+        if not source_url:
+            return
+
+        if not self._has_header(headers, "Referer"):
+            headers["Referer"] = source_url
+
+        origin = self._build_origin(source_url)
+        if origin and not self._has_header(headers, "Origin"):
+            headers["Origin"] = origin
+
+    def _build_origin(self, source_url: str) -> str | None:
+        parsed = urlparse(source_url)
+        if not parsed.scheme or not parsed.netloc:
+            return None
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    def _has_header(self, headers: dict[str, str], name: str) -> bool:
+        target = name.lower()
+        return any(key.lower() == target for key in headers)
 
     async def _resolve_proxy_target(
         self,

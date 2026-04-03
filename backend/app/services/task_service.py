@@ -306,8 +306,7 @@ class TaskService:
         proxy_base_url = f"{settings.api_public_origin}{settings.api_v1_prefix}/tasks/{task_id}/proxy"
 
         if metadata.direct_url:
-            direct_ext = self._safe_extension(metadata.direct_ext)
-            proxy_url = f"{proxy_base_url}/media.{direct_ext}?kind=single"
+            proxy_url = f"{proxy_base_url}?kind=single"
             return TaskResult(
                 result_type=ResultType.DIRECT,
                 play_url=proxy_url,
@@ -320,30 +319,20 @@ class TaskService:
             )
 
         if metadata.video_url or metadata.audio_url:
-            video_ext = self._safe_extension(metadata.video_ext)
-            audio_ext = self._safe_extension(metadata.audio_ext)
             return TaskResult(
                 result_type=ResultType.SPLIT_STREAMS,
                 direct_url=None,
                 video_url=metadata.video_url,
                 video_redirect_url=f"{redirect_base_url}?kind=video" if metadata.video_url else None,
-                video_proxy_url=(
-                    f"{proxy_base_url}/video.{video_ext}?kind=video" if metadata.video_url else None
-                ),
+                video_proxy_url=f"{proxy_base_url}?kind=video" if metadata.video_url else None,
                 audio_url=metadata.audio_url,
                 audio_redirect_url=f"{redirect_base_url}?kind=audio" if metadata.audio_url else None,
-                audio_proxy_url=(
-                    f"{proxy_base_url}/audio.{audio_ext}?kind=audio" if metadata.audio_url else None
-                ),
+                audio_proxy_url=f"{proxy_base_url}?kind=audio" if metadata.audio_url else None,
                 created_at=created_at,
                 expires_note="当前只有分离流地址。自动模式会下载并合成为单文件。",
             )
 
         raise DownloaderExecutionError("未能通过 yt-dlp 提取到可用的媒体地址。")
-
-    def _safe_extension(self, ext: str | None) -> str:
-        normalized = (ext or "").strip().lower().lstrip(".")
-        return normalized or "bin"
 
     async def _update_task(
         self,
