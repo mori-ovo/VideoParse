@@ -30,7 +30,11 @@ async def get_task_result(task_id: str) -> TaskResult:
     return result
 
 
-@router.get("/{task_id}/redirect", summary="获取可刷新的媒体重定向地址")
+@router.api_route(
+    "/{task_id}/redirect",
+    methods=["GET", "HEAD"],
+    summary="获取可刷新的媒体重定向地址",
+)
 async def redirect_task_media(
     task_id: str,
     kind: str = Query(default="single", pattern="^(single|video|audio)$"),
