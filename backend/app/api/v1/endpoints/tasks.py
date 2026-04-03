@@ -50,3 +50,17 @@ async def proxy_task_media(
     kind: str = Query(default="single", pattern="^(single|video|audio)$"),
 ) -> object:
     return await proxy_service.build_proxy_response(task_id=task_id, kind=kind, request=request)
+
+
+@router.api_route(
+    "/{task_id}/proxy/{file_name:path}",
+    methods=["GET", "HEAD"],
+    summary="获取带扩展名的媒体代理地址",
+)
+async def proxy_task_media_with_name(
+    request: Request,
+    task_id: str,
+    file_name: str,
+    kind: str = Query(default="single", pattern="^(single|video|audio)$"),
+) -> object:
+    return await proxy_service.build_proxy_response(task_id=task_id, kind=kind, request=request)

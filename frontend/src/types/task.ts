@@ -17,6 +17,7 @@ export interface TaskResult {
   file_id: string | null
   file_name: string | null
   content_type: string | null
+  play_url: string | null
   download_url: string | null
   direct_url: string | null
   redirect_url: string | null

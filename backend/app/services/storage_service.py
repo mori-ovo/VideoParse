@@ -4,6 +4,7 @@ import mimetypes
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 from uuid import uuid4
 
 from app.core.config import settings
@@ -63,6 +64,7 @@ class LocalStorageService:
             file_id=file_id,
             file_name=file_name,
             content_type=stored_file.content_type,
+            play_url=f"{settings.api_public_origin}{settings.api_v1_prefix}/files/{file_id}/{quote(file_name, safe='')}",
             download_url=f"{settings.api_v1_prefix}/files/{file_id}/download",
             placeholder=True,
             created_at=created_at,
@@ -91,6 +93,10 @@ class LocalStorageService:
             file_id=file_id,
             file_name=stored_file.file_name,
             content_type=stored_file.content_type,
+            play_url=(
+                f"{settings.api_public_origin}{settings.api_v1_prefix}/files/"
+                f"{file_id}/{quote(stored_file.file_name, safe='')}"
+            ),
             download_url=f"{settings.api_public_origin}{settings.api_v1_prefix}/files/{file_id}/download",
             placeholder=False,
             created_at=created_at,

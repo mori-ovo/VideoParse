@@ -144,8 +144,13 @@ class DownloaderService:
         )
 
         try:
-            with yt_dlp.YoutubeDL(options) as ydl:
-                info = ydl.extract_info(url, download=False)
+            info = self._extract_info_with_format_fallback(
+                yt_dlp_module=yt_dlp,
+                options=options,
+                logger=logger,
+                url=url,
+                download=False,
+            )
         except Exception as exc:  # noqa: BLE001
             message = logger.errors[-1] if logger.errors else str(exc)
             raise DownloaderExecutionError(self._build_guided_error_message(url, message)) from exc
@@ -176,7 +181,13 @@ class DownloaderService:
         )
 
         try:
-            info = self._extract_info_with_format_fallback(yt_dlp, options, logger, url)
+            info = self._extract_info_with_format_fallback(
+                yt_dlp_module=yt_dlp,
+                options=options,
+                logger=logger,
+                url=url,
+                download=True,
+            )
         except Exception as exc:  # noqa: BLE001
             message = logger.errors[-1] if logger.errors else str(exc)
             raise DownloaderExecutionError(self._build_guided_error_message(url, message)) from exc
@@ -206,10 +217,11 @@ class DownloaderService:
         options: dict[str, Any],
         logger: YtDlpLogger,
         url: str,
+        download: bool,
     ) -> Any:
         try:
             with yt_dlp_module.YoutubeDL(options) as ydl:
-                return ydl.extract_info(url, download=True)
+                return ydl.extract_info(url, download=download)
         except Exception as exc:  # noqa: BLE001
             message = logger.errors[-1] if logger.errors else str(exc)
             if "Requested format is not available" not in message or "format" not in options:
@@ -219,7 +231,7 @@ class DownloaderService:
             fallback_options.pop("format", None)
             logger.errors.clear()
             with yt_dlp_module.YoutubeDL(fallback_options) as ydl:
-                return ydl.extract_info(url, download=True)
+                return ydl.extract_info(url, download=download)
 
     def _build_options(
         self,
@@ -232,6 +244,7 @@ class DownloaderService:
         output_dir = settings.output_dir / task_id
         temp_dir = settings.temp_dir / task_id
         options: dict[str, Any] = {
+            "ignoreconfig": True,
             "merge_output_format": settings.merge_output_format,
             "noplaylist": True,
             "quiet": True,
@@ -454,7 +467,7 @@ class DownloaderService:
             requires_merge=self._requires_merge(info),
             direct_playable=progressive is not None,
             uploader=info.get("uploader") or info.get("channel"),
-            duration=info.get("duration"),
+            duration=self._normalize_duration(info.get("duration")),
             thumbnail=info.get("thumbnail"),
             extractor=info.get("extractor_key") or info.get("extractor"),
             direct_url=progressive.get("url") if progressive else None,
@@ -621,6 +634,16 @@ class DownloaderService:
         if not isinstance(headers, dict):
             return {}
         return {str(key): str(value) for key, value in headers.items() if value is not None}
+
+    def _normalize_duration(self, value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return max(0, int(round(value)))
+        try:
+            return max(0, int(round(float(value))))
+        except (TypeError, ValueError):
+            return None
 
     def _load_yt_dlp_module(self) -> Any:
         if not self._is_yt_dlp_available():

@@ -125,7 +125,7 @@ class TaskService:
                     task_id=task_id,
                     status_value=TaskStatus.SUCCESS,
                     progress=100,
-                    message="已生成可复制直链。你现在可以复制直链，或直接下载视频。",
+                    message="已生成可分享的视频直链。你现在可以复制直链，或直接下载视频。",
                     result=result,
                 )
                 return
@@ -163,7 +163,7 @@ class TaskService:
                 task_id=task_id,
                 status_value=TaskStatus.UPLOADING,
                 progress=95,
-                message="正在注册最终视频文件并生成下载地址。",
+                message="正在注册最终视频文件并生成访问地址。",
                 extra_updates={
                     "title": downloaded_media.title,
                     "requires_merge": downloaded_media.requires_merge,
@@ -180,7 +180,7 @@ class TaskService:
                 task_id=task_id,
                 status_value=TaskStatus.SUCCESS,
                 progress=100,
-                message="已生成单文件视频。你现在可以复制直链，或直接下载视频。",
+                message="已生成单文件视频。你现在可以复制视频直链，或直接下载视频。",
                 result=result,
             )
         except (DownloaderUnavailableError, DownloaderExecutionError) as exc:
@@ -244,7 +244,7 @@ class TaskService:
                 return metadata.direct_url
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="当前源站没有单文件直链，请改用自动模式生成单文件下载地址。",
+                detail="当前源站没有单文件直链，请改用自动模式生成单文件视频地址。",
             )
 
         if kind == "video":
@@ -282,38 +282,52 @@ class TaskService:
 
     def _build_direct_message(self, result_type: ResultType) -> str:
         if result_type == ResultType.DIRECT:
-            return "已生成可复制直链。你现在可以复制直链，或直接下载视频。"
-        return "当前只拿到了分离流地址。若需要单文件，请使用自动模式。"
+            return "已生成可分享的视频直链。你现在可以复制直链，或直接下载视频。"
+        return "当前只能拿到分离流地址。若需要单文件，请使用自动模式。"
 
     def _build_direct_result(self, task_id: str, metadata: Any) -> TaskResult:
         created_at = datetime.now(timezone.utc)
-        base_url = f"{settings.api_public_origin}{settings.api_v1_prefix}/tasks/{task_id}/redirect"
+        redirect_base_url = f"{settings.api_public_origin}{settings.api_v1_prefix}/tasks/{task_id}/redirect"
         proxy_base_url = f"{settings.api_public_origin}{settings.api_v1_prefix}/tasks/{task_id}/proxy"
 
         if metadata.direct_url:
+            direct_ext = self._safe_extension(metadata.direct_ext)
+            proxy_url = f"{proxy_base_url}/media.{direct_ext}?kind=single"
             return TaskResult(
                 result_type=ResultType.DIRECT,
+                play_url=proxy_url,
                 direct_url=metadata.direct_url,
-                redirect_url=f"{base_url}?kind=single",
-                proxy_url=f"{proxy_base_url}?kind=single",
+                redirect_url=f"{redirect_base_url}?kind=single",
+                proxy_url=proxy_url,
                 created_at=created_at,
-                expires_note="建议优先使用项目生成的 proxy_url。源站直链通常带时效。",
+                expires_note="建议优先使用项目生成的 play_url 或 proxy_url。源站直链通常带时效。",
             )
 
         if metadata.video_url or metadata.audio_url:
+            video_ext = self._safe_extension(metadata.video_ext)
+            audio_ext = self._safe_extension(metadata.audio_ext)
             return TaskResult(
                 result_type=ResultType.SPLIT_STREAMS,
+                direct_url=None,
                 video_url=metadata.video_url,
-                video_redirect_url=f"{base_url}?kind=video" if metadata.video_url else None,
-                video_proxy_url=f"{proxy_base_url}?kind=video" if metadata.video_url else None,
+                video_redirect_url=f"{redirect_base_url}?kind=video" if metadata.video_url else None,
+                video_proxy_url=(
+                    f"{proxy_base_url}/video.{video_ext}?kind=video" if metadata.video_url else None
+                ),
                 audio_url=metadata.audio_url,
-                audio_redirect_url=f"{base_url}?kind=audio" if metadata.audio_url else None,
-                audio_proxy_url=f"{proxy_base_url}?kind=audio" if metadata.audio_url else None,
+                audio_redirect_url=f"{redirect_base_url}?kind=audio" if metadata.audio_url else None,
+                audio_proxy_url=(
+                    f"{proxy_base_url}/audio.{audio_ext}?kind=audio" if metadata.audio_url else None
+                ),
                 created_at=created_at,
                 expires_note="当前只有分离流地址。自动模式会下载并合成为单文件。",
             )
 
         raise DownloaderExecutionError("未能通过 yt-dlp 提取到可用的媒体地址。")
+
+    def _safe_extension(self, ext: str | None) -> str:
+        normalized = (ext or "").strip().lower().lstrip(".")
+        return normalized or "bin"
 
     async def _update_task(
         self,

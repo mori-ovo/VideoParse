@@ -39,6 +39,7 @@ class TaskResult(BaseModel):
     file_id: str | None = None
     file_name: str | None = None
     content_type: str | None = None
+    play_url: str | None = None
     download_url: str | None = None
     direct_url: str | None = None
     redirect_url: str | None = None

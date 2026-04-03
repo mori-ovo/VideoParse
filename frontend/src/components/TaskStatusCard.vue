@@ -53,7 +53,15 @@ const copyUrl = computed(() => {
     return null
   }
 
-  return result.download_url ?? result.proxy_url ?? result.redirect_url ?? result.direct_url ?? null
+  return (
+    result.play_url ??
+    result.proxy_url ??
+    result.direct_url ??
+    result.video_proxy_url ??
+    result.download_url ??
+    result.redirect_url ??
+    null
+  )
 })
 
 const downloadUrl = computed(() => {
@@ -62,7 +70,7 @@ const downloadUrl = computed(() => {
     return null
   }
 
-  return result.download_url ?? result.proxy_url ?? result.redirect_url ?? result.direct_url ?? null
+  return result.download_url ?? result.play_url ?? result.proxy_url ?? result.direct_url ?? null
 })
 
 const linkSummary = computed(() => {
@@ -71,16 +79,16 @@ const linkSummary = computed(() => {
     return ''
   }
 
-  if (result.download_url) {
-    return '当前结果已经是项目生成的单文件地址，可直接复制，也可直接下载。'
+  if (result.play_url && result.download_url) {
+    return '复制直链会复制可播放的视频地址；下载视频会使用单独的下载地址。'
   }
 
-  if (result.proxy_url) {
-    return '当前结果使用项目代理直链，适合复制给播放器或外部应用。'
+  if (result.play_url) {
+    return '当前结果已经生成可播放的视频直链，适合复制给播放器或外部应用。'
   }
 
   if (result.video_proxy_url || result.audio_proxy_url) {
-    return '当前源站仍是分离流。自动模式通常会继续生成单文件；如果没有生成，请查看错误信息。'
+    return '当前源站仍是分离流。只有在源站本身存在单文件流，或者后端合流完成后，才能得到单文件视频地址。'
   }
 
   return ''
