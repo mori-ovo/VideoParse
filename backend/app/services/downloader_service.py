@@ -540,6 +540,16 @@ class DownloaderService:
         if configured_extractor_args:
             options["extractor_args"] = configured_extractor_args
 
+        configured_js_runtimes = self._build_configured_js_runtimes(request_options.platform)
+        if configured_js_runtimes:
+            options["js_runtimes"] = configured_js_runtimes
+
+        configured_remote_components = self._build_configured_remote_components(
+            request_options.platform
+        )
+        if configured_remote_components:
+            options["remote_components"] = configured_remote_components
+
         if download and progress_callback is not None:
             options["progress_hooks"] = [self._build_progress_hook(progress_callback)]
 
@@ -597,6 +607,42 @@ class DownloaderService:
         if not youtube_args:
             return None
         return {"youtube": youtube_args}
+
+    def _build_configured_js_runtimes(
+        self,
+        platform: Platform | None,
+    ) -> dict[str, dict[str, str]] | None:
+        if platform != Platform.YOUTUBE:
+            return None
+
+        configured = self._split_csv(getattr(settings, "youtube_js_runtimes", None))
+        runtimes = [runtime.lower() for runtime in configured if runtime.strip()]
+
+        if not runtimes:
+            if shutil.which("node"):
+                runtimes = ["node"]
+            elif shutil.which("deno"):
+                runtimes = ["deno"]
+            elif shutil.which("bun"):
+                runtimes = ["bun"]
+            elif shutil.which("qjs"):
+                runtimes = ["quickjs"]
+
+        if not runtimes:
+            return None
+        return {runtime: {} for runtime in runtimes}
+
+    def _build_configured_remote_components(
+        self,
+        platform: Platform | None,
+    ) -> list[str] | None:
+        if platform != Platform.YOUTUBE:
+            return None
+
+        configured = self._split_csv(getattr(settings, "youtube_remote_components", None))
+        if configured:
+            return configured
+        return None
 
     def _merge_options(self, base_options: dict[str, Any], extra_options: dict[str, Any]) -> dict[str, Any]:
         if not extra_options:
@@ -735,6 +781,8 @@ class DownloaderService:
                 hints.append("可配置 BILIBILI_SESSDATA 或 BILIBILI_COOKIES")
 
         if platform == Platform.YOUTUBE:
+            if "No supported JavaScript runtime could be found" in message:
+                hints.append("可配置 YOUTUBE_JS_RUNTIMES=node；若需 EJS 远程组件，可再配置 YOUTUBE_REMOTE_COMPONENTS=ejs:github")
             if "Sign in to confirm you" in message and not (
                 settings.youtube_cookies
                 or settings.cookies
@@ -742,6 +790,8 @@ class DownloaderService:
                 or settings.cookies_file
             ):
                 hints.append("可配置 YOUTUBE_COOKIES，建议直接使用浏览器完整 Cookie 串")
+            elif "Sign in to confirm you" in message:
+                hints.append("当前已配置 YouTube Cookie，但仍触发 bot 校验；通常需要刷新完整浏览器 Cookie，必要时再补充 YOUTUBE_PO_TOKEN")
             if "Requested format is not available" in message:
                 hints.append("可尝试清空自定义 DOWNLOAD_FORMAT，或补充 YOUTUBE_PO_TOKEN")
 

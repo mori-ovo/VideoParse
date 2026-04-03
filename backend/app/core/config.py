@@ -80,6 +80,14 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("YOUTUBE_PO_TOKEN"),
     )
+    youtube_js_runtimes: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("YOUTUBE_JS_RUNTIMES"),
+    )
+    youtube_remote_components: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("YOUTUBE_REMOTE_COMPONENTS"),
+    )
 
     twitter_cookies: str | None = Field(
         default=None,
