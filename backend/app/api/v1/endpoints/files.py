@@ -1,7 +1,5 @@
-from urllib.parse import quote
-
 from fastapi import APIRouter, HTTPException, status
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse
 
 from app.services.storage_service import storage_service
 
@@ -26,7 +24,7 @@ async def download_file(file_id: str) -> FileResponse:
 
 
 @router.get("/{file_id}", summary="获取可播放文件地址")
-async def open_file(file_id: str) -> RedirectResponse:
+async def open_file(file_id: str) -> FileResponse:
     stored_file = await storage_service.get_file(file_id)
     if stored_file is None:
         raise HTTPException(
@@ -34,9 +32,10 @@ async def open_file(file_id: str) -> RedirectResponse:
             detail="文件不存在或已被清理。",
         )
 
-    return RedirectResponse(
-        url=f"/api/v1/files/{file_id}/{quote(stored_file.file_name, safe='')}",
-        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+    return FileResponse(
+        path=stored_file.path,
+        media_type=stored_file.content_type,
+        content_disposition_type="inline",
     )
 
 

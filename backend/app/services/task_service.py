@@ -296,6 +296,7 @@ class TaskService:
             return TaskResult(
                 result_type=ResultType.DIRECT,
                 play_url=proxy_url,
+                download_url=proxy_url,
                 direct_url=metadata.direct_url,
                 redirect_url=f"{redirect_base_url}?kind=single",
                 proxy_url=proxy_url,

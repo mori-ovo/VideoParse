@@ -1,14 +1,21 @@
 import asyncio
 import importlib
+import logging
 import mimetypes
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
 from app.core.config import settings
 from app.schemas.task import Platform
+from app.services.third_party_fallback_service import (
+    ThirdPartyFallbackError,
+    third_party_fallback_service,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class DownloaderUnavailableError(RuntimeError):
@@ -80,6 +87,13 @@ class PlatformRequestOptions:
     user_agent: str | None
 
 
+@dataclass(frozen=True)
+class ExtractionAttempt:
+    name: str
+    request_options: PlatformRequestOptions
+    extra_options: dict[str, Any]
+
+
 class YtDlpLogger:
     def __init__(self) -> None:
         self.errors: list[str] = []
@@ -132,31 +146,19 @@ class DownloaderService:
         )
 
     def _extract_metadata_sync(self, url: str) -> ExtractedMedia:
-        yt_dlp = self._load_yt_dlp_module()
-        logger = YtDlpLogger()
-        request_options = self._resolve_platform_request_options(url)
-        options = self._build_options(
-            task_id="metadata",
-            logger=logger,
-            progress_callback=None,
-            download=False,
-            request_options=request_options,
-        )
-
         try:
-            info = self._extract_info_with_format_fallback(
-                yt_dlp_module=yt_dlp,
-                options=options,
-                logger=logger,
+            normalized = self._extract_info_sync(
+                task_id="metadata",
                 url=url,
                 download=False,
+                progress_callback=None,
             )
-        except Exception as exc:  # noqa: BLE001
-            message = logger.errors[-1] if logger.errors else str(exc)
-            raise DownloaderExecutionError(self._build_guided_error_message(url, message)) from exc
-
-        normalized = self._normalize_info(info)
-        return self._build_extracted_media(normalized)
+            return self._build_extracted_media(normalized)
+        except (DownloaderExecutionError, DownloaderUnavailableError):
+            fallback_media = self._resolve_third_party_metadata(url)
+            if fallback_media is not None:
+                return fallback_media
+            raise
 
     def _download_sync(
         self,
@@ -164,35 +166,18 @@ class DownloaderService:
         url: str,
         progress_callback: Callable[[DownloadProgressEvent], None] | None,
     ) -> DownloadedMedia:
-        yt_dlp = self._load_yt_dlp_module()
         task_output_dir = settings.output_dir / task_id
         task_temp_dir = settings.temp_dir / task_id
         task_output_dir.mkdir(parents=True, exist_ok=True)
         task_temp_dir.mkdir(parents=True, exist_ok=True)
 
-        logger = YtDlpLogger()
-        request_options = self._resolve_platform_request_options(url)
-        options = self._build_options(
+        normalized = self._extract_info_sync(
             task_id=task_id,
-            logger=logger,
-            progress_callback=progress_callback,
+            url=url,
             download=True,
-            request_options=request_options,
+            progress_callback=progress_callback,
         )
 
-        try:
-            info = self._extract_info_with_format_fallback(
-                yt_dlp_module=yt_dlp,
-                options=options,
-                logger=logger,
-                url=url,
-                download=True,
-            )
-        except Exception as exc:  # noqa: BLE001
-            message = logger.errors[-1] if logger.errors else str(exc)
-            raise DownloaderExecutionError(self._build_guided_error_message(url, message)) from exc
-
-        normalized = self._normalize_info(info)
         media_path = self._find_downloaded_media_file(task_output_dir)
         if media_path is None:
             raise DownloaderExecutionError("yt-dlp 执行完成，但没有找到最终输出文件。")
@@ -210,6 +195,191 @@ class DownloaderService:
             thumbnail=extracted.thumbnail,
             extractor=extracted.extractor,
         )
+
+    def _extract_info_sync(
+        self,
+        task_id: str,
+        url: str,
+        download: bool,
+        progress_callback: Callable[[DownloadProgressEvent], None] | None,
+    ) -> dict[str, Any]:
+        yt_dlp = self._load_yt_dlp_module()
+        logger = YtDlpLogger()
+        request_options = self._resolve_platform_request_options(url)
+        attempts = self._build_attempts(request_options)
+
+        last_exc: Exception | None = None
+        last_message = "未能提取媒体信息。"
+
+        for attempt in attempts:
+            base_options = self._build_options(
+                task_id=task_id,
+                logger=logger,
+                progress_callback=progress_callback,
+                download=download,
+                request_options=attempt.request_options,
+            )
+            options = self._merge_options(base_options, attempt.extra_options)
+
+            try:
+                info = self._extract_info_with_format_fallback(
+                    yt_dlp_module=yt_dlp,
+                    options=options,
+                    logger=logger,
+                    url=url,
+                    download=download,
+                )
+                normalized = self._normalize_info(info)
+                if not download and not self._has_usable_media(normalized):
+                    last_message = "提取成功，但没有拿到可用的视频或音频地址。"
+                    continue
+                return normalized
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                last_message = logger.errors[-1] if logger.errors else str(exc)
+                logger.errors.clear()
+                continue
+
+        if last_exc is not None:
+            raise DownloaderExecutionError(self._build_guided_error_message(url, last_message)) from last_exc
+        raise DownloaderExecutionError(self._build_guided_error_message(url, last_message))
+
+    def _build_attempts(self, request_options: PlatformRequestOptions) -> list[ExtractionAttempt]:
+        attempts: list[ExtractionAttempt] = [
+            ExtractionAttempt(
+                name="default",
+                request_options=request_options,
+                extra_options={},
+            )
+        ]
+        platform = request_options.platform
+
+        if platform == Platform.YOUTUBE:
+            attempts.append(
+                ExtractionAttempt(
+                    name="youtube-incomplete",
+                    request_options=request_options,
+                    extra_options={
+                        "extractor_args": {
+                            "youtube": {
+                                "formats": ["incomplete"],
+                            }
+                        }
+                    },
+                )
+            )
+            attempts.append(
+                ExtractionAttempt(
+                    name="youtube-ios",
+                    request_options=request_options,
+                    extra_options={
+                        "extractor_args": {
+                            "youtube": {
+                                "player_client": ["ios"],
+                                "formats": ["incomplete"],
+                            }
+                        }
+                    },
+                )
+            )
+            attempts.append(
+                ExtractionAttempt(
+                    name="youtube-android",
+                    request_options=request_options,
+                    extra_options={
+                        "extractor_args": {
+                            "youtube": {
+                                "player_client": ["android"],
+                                "formats": ["incomplete"],
+                            }
+                        }
+                    },
+                )
+            )
+
+        if platform == Platform.TWITTER:
+            if request_options.cookie_header or request_options.cookies_file:
+                guest_options = replace(request_options, cookie_header=None, cookies_file=None)
+                attempts.extend(
+                    [
+                        ExtractionAttempt(
+                            name="twitter-guest-default",
+                            request_options=guest_options,
+                            extra_options={},
+                        ),
+                        ExtractionAttempt(
+                            name="twitter-guest-syndication",
+                            request_options=guest_options,
+                            extra_options={
+                                "extractor_args": {
+                                    "twitter": {
+                                        "api": ["syndication"],
+                                    }
+                                }
+                            },
+                        ),
+                        ExtractionAttempt(
+                            name="twitter-guest-legacy",
+                            request_options=guest_options,
+                            extra_options={
+                                "extractor_args": {
+                                    "twitter": {
+                                        "api": ["legacy"],
+                                    }
+                                }
+                            },
+                        ),
+                    ]
+                )
+            else:
+                attempts.extend(
+                    [
+                        ExtractionAttempt(
+                            name="twitter-syndication",
+                            request_options=request_options,
+                            extra_options={
+                                "extractor_args": {
+                                    "twitter": {
+                                        "api": ["syndication"],
+                                    }
+                                }
+                            },
+                        ),
+                        ExtractionAttempt(
+                            name="twitter-legacy",
+                            request_options=request_options,
+                            extra_options={
+                                "extractor_args": {
+                                    "twitter": {
+                                        "api": ["legacy"],
+                                    }
+                                }
+                            },
+                        ),
+                    ]
+                )
+
+        return self._dedupe_attempts(attempts)
+
+    def _dedupe_attempts(self, attempts: list[ExtractionAttempt]) -> list[ExtractionAttempt]:
+        unique: list[ExtractionAttempt] = []
+        seen: set[str] = set()
+        for attempt in attempts:
+            marker = repr(
+                (
+                    attempt.request_options.platform,
+                    attempt.request_options.proxy,
+                    attempt.request_options.cookie_header,
+                    str(attempt.request_options.cookies_file) if attempt.request_options.cookies_file else None,
+                    attempt.request_options.user_agent,
+                    attempt.extra_options,
+                )
+            )
+            if marker in seen:
+                continue
+            seen.add(marker)
+            unique.append(attempt)
+        return unique
 
     def _extract_info_with_format_fallback(
         self,
@@ -282,10 +452,90 @@ class DownloaderService:
         if ffmpeg_location is not None:
             options["ffmpeg_location"] = ffmpeg_location
 
+        configured_extractor_args = self._build_configured_extractor_args(request_options.platform)
+        if configured_extractor_args:
+            options["extractor_args"] = configured_extractor_args
+
         if download and progress_callback is not None:
             options["progress_hooks"] = [self._build_progress_hook(progress_callback)]
 
         return options
+
+    def _resolve_third_party_metadata(self, url: str) -> ExtractedMedia | None:
+        platform = self._detect_platform(url)
+        if platform != Platform.TWITTER:
+            return None
+
+        try:
+            media = third_party_fallback_service.resolve_twitter_media(url)
+        except ThirdPartyFallbackError as exc:
+            logger.warning("twitter third-party fallback failed: %s", exc)
+            return None
+
+        if media is None:
+            return None
+
+        return ExtractedMedia(
+            title=media.title,
+            requires_merge=False,
+            direct_playable=True,
+            uploader=media.uploader,
+            duration=media.duration,
+            thumbnail=media.thumbnail,
+            extractor=media.extractor,
+            direct_url=media.direct_url,
+            video_url=None,
+            audio_url=None,
+            direct_ext=media.direct_ext,
+            video_ext=None,
+            audio_ext=None,
+            direct_headers={},
+            video_headers={},
+            audio_headers={},
+        )
+
+    def _build_configured_extractor_args(
+        self,
+        platform: Platform | None,
+    ) -> dict[str, dict[str, list[str]]] | None:
+        if platform != Platform.YOUTUBE:
+            return None
+
+        youtube_args: dict[str, list[str]] = {}
+        player_clients = self._split_csv(getattr(settings, "youtube_player_client", None))
+        if player_clients:
+            youtube_args["player_client"] = player_clients
+
+        po_token = getattr(settings, "youtube_po_token", None)
+        if isinstance(po_token, str) and po_token.strip():
+            youtube_args["po_token"] = [po_token.strip()]
+
+        if not youtube_args:
+            return None
+        return {"youtube": youtube_args}
+
+    def _merge_options(self, base_options: dict[str, Any], extra_options: dict[str, Any]) -> dict[str, Any]:
+        if not extra_options:
+            return dict(base_options)
+
+        merged = dict(base_options)
+        for key, value in extra_options.items():
+            if key == "extractor_args":
+                current_args = dict(merged.get("extractor_args") or {})
+                for ie_key, ie_args in value.items():
+                    current_ie_args = dict(current_args.get(ie_key) or {})
+                    for arg_key, arg_values in ie_args.items():
+                        current_ie_args[arg_key] = list(arg_values)
+                    current_args[ie_key] = current_ie_args
+                merged["extractor_args"] = current_args
+            else:
+                merged[key] = value
+        return merged
+
+    def _split_csv(self, value: str | None) -> list[str]:
+        if not isinstance(value, str):
+            return []
+        return [item.strip() for item in value.split(",") if item.strip()]
 
     def _resolve_platform_request_options(self, url: str) -> PlatformRequestOptions:
         platform = self._detect_platform(url)
@@ -400,16 +650,19 @@ class DownloaderService:
             ):
                 hints.append("可配置 BILIBILI_SESSDATA 或 BILIBILI_COOKIES")
 
-        if platform == Platform.YOUTUBE and "Sign in to confirm you" in message:
-            if not (
+        if platform == Platform.YOUTUBE:
+            if "Sign in to confirm you" in message and not (
                 settings.youtube_cookies
                 or settings.cookies
                 or settings.youtube_cookies_file
                 or settings.cookies_file
             ):
                 hints.append("可配置 YOUTUBE_COOKIES，建议直接使用浏览器完整 Cookie 串")
+            if "Requested format is not available" in message:
+                hints.append("可尝试清空自定义 DOWNLOAD_FORMAT，或补充 YOUTUBE_PO_TOKEN")
 
         if platform == Platform.TWITTER and "No video could be found in this tweet" in message:
+            hints.append("当前已自动尝试 guest / syndication / legacy 回退；若仍失败，说明该推文并非标准公开媒体接口可见")
             if not (
                 settings.twitter_cookies
                 or settings.twitter_auth_token
@@ -480,6 +733,10 @@ class DownloaderService:
             video_headers=self._normalize_headers(best_video.get("http_headers")) if best_video else {},
             audio_headers=self._normalize_headers(best_audio.get("http_headers")) if best_audio else {},
         )
+
+    def _has_usable_media(self, info: dict[str, Any]) -> bool:
+        extracted = self._build_extracted_media(info)
+        return any([extracted.direct_url, extracted.video_url, extracted.audio_url])
 
     def _requires_merge(self, info: dict[str, Any]) -> bool:
         requested_formats = info.get("requested_formats") or []

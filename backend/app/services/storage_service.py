@@ -1,11 +1,11 @@
 import asyncio
 import json
 import mimetypes
+import secrets
+import string
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote
-from uuid import uuid4
 
 from app.core.config import settings
 from app.schemas.task import ResultType, TaskRecord, TaskResult
@@ -28,9 +28,9 @@ class LocalStorageService:
         self._lock = asyncio.Lock()
 
     async def save_placeholder_output(self, task: TaskRecord) -> TaskResult:
-        file_id = uuid4().hex
         safe_title = slugify_filename(task.title) or task.platform.value
-        file_name = f"{safe_title}-{task.task_id}.txt"
+        file_id = self._generate_file_id()
+        file_name = f"{safe_title}-{file_id}.txt"
         file_path = settings.output_dir / file_name
         created_at = datetime.now(timezone.utc)
 
@@ -56,6 +56,9 @@ class LocalStorageService:
             file_size=file_path.stat().st_size,
         )
         async with self._lock:
+            while file_id in self._files:
+                file_id = self._generate_file_id()
+                stored_file.file_id = file_id
             self._files[file_id] = stored_file
             self._persist_index()
 
@@ -64,15 +67,15 @@ class LocalStorageService:
             file_id=file_id,
             file_name=file_name,
             content_type=stored_file.content_type,
-            play_url=f"{settings.api_public_origin}{settings.api_v1_prefix}/files/{file_id}/{quote(file_name, safe='')}",
-            download_url=f"{settings.api_v1_prefix}/files/{file_id}/download",
+            play_url=f"{settings.api_public_origin}{settings.api_v1_prefix}/files/{file_id}",
+            download_url=f"{settings.api_public_origin}{settings.api_v1_prefix}/files/{file_id}/download",
             placeholder=True,
             created_at=created_at,
             file_size=stored_file.file_size,
         )
 
     async def register_downloaded_file(self, file_path: Path) -> TaskResult:
-        file_id = uuid4().hex
+        file_id = self._generate_file_id()
         created_at = datetime.now(timezone.utc)
         content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
         stored_file = StoredFile(
@@ -85,6 +88,9 @@ class LocalStorageService:
         )
 
         async with self._lock:
+            while file_id in self._files:
+                file_id = self._generate_file_id()
+                stored_file.file_id = file_id
             self._files[file_id] = stored_file
             self._persist_index()
 
@@ -93,10 +99,7 @@ class LocalStorageService:
             file_id=file_id,
             file_name=stored_file.file_name,
             content_type=stored_file.content_type,
-            play_url=(
-                f"{settings.api_public_origin}{settings.api_v1_prefix}/files/"
-                f"{file_id}/{quote(stored_file.file_name, safe='')}"
-            ),
+            play_url=f"{settings.api_public_origin}{settings.api_v1_prefix}/files/{file_id}",
             download_url=f"{settings.api_public_origin}{settings.api_v1_prefix}/files/{file_id}/download",
             placeholder=False,
             created_at=created_at,
@@ -151,6 +154,10 @@ class LocalStorageService:
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    def _generate_file_id(self) -> str:
+        alphabet = string.ascii_lowercase + string.digits
+        return "".join(secrets.choice(alphabet) for _ in range(12))
 
 
 storage_service = LocalStorageService()

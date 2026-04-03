@@ -72,6 +72,14 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("YOUTUBE_COOKIES_FILE", "YT_DLP_YOUTUBE_COOKIES_FILE"),
     )
+    youtube_player_client: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("YOUTUBE_PLAYER_CLIENT"),
+    )
+    youtube_po_token: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("YOUTUBE_PO_TOKEN"),
+    )
 
     twitter_cookies: str | None = Field(
         default=None,

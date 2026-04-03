@@ -8,7 +8,8 @@ const props = defineProps<{
   result: TaskResult | null
 }>()
 
-const copyFeedback = ref('复制直链')
+const defaultCopyLabel = '复制直链'
+const copyFeedback = ref(defaultCopyLabel)
 
 function formatDate(value: string): string {
   return new Date(value).toLocaleString('zh-CN')
@@ -47,21 +48,43 @@ function formatFileSize(bytes: number | null | undefined): string {
   return `${size.toFixed(size >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
 }
 
+function fallbackCopyText(value: string): boolean {
+  const textarea = document.createElement('textarea')
+  textarea.value = value
+  textarea.setAttribute('readonly', 'true')
+  textarea.style.position = 'fixed'
+  textarea.style.top = '0'
+  textarea.style.left = '-9999px'
+  document.body.appendChild(textarea)
+  textarea.focus()
+  textarea.select()
+
+  let copied = false
+  try {
+    copied = document.execCommand('copy')
+  } catch {
+    copied = false
+  } finally {
+    document.body.removeChild(textarea)
+  }
+
+  return copied
+}
+
+function setCopyFeedback(value: string): void {
+  copyFeedback.value = value
+  window.setTimeout(() => {
+    copyFeedback.value = defaultCopyLabel
+  }, 1500)
+}
+
 const copyUrl = computed(() => {
   const result = props.result
   if (!result) {
     return null
   }
 
-  return (
-    result.play_url ??
-    result.proxy_url ??
-    result.direct_url ??
-    result.video_proxy_url ??
-    result.download_url ??
-    result.redirect_url ??
-    null
-  )
+  return result.play_url ?? result.proxy_url ?? result.download_url ?? null
 })
 
 const downloadUrl = computed(() => {
@@ -70,7 +93,7 @@ const downloadUrl = computed(() => {
     return null
   }
 
-  return result.download_url ?? result.play_url ?? result.proxy_url ?? result.direct_url ?? null
+  return result.download_url ?? result.play_url ?? result.proxy_url ?? null
 })
 
 const linkSummary = computed(() => {
@@ -80,15 +103,15 @@ const linkSummary = computed(() => {
   }
 
   if (result.play_url && result.download_url) {
-    return '复制直链会复制可播放的视频地址；下载视频会使用单独的下载地址。'
+    return '复制直链会复制本站播放地址；下载视频会使用本站下载地址。'
   }
 
   if (result.play_url) {
-    return '当前结果已经生成可播放的视频直链，适合复制给播放器或外部应用。'
+    return '当前结果已经生成本站播放链接，适合复制给播放器或外部应用。'
   }
 
   if (result.video_proxy_url || result.audio_proxy_url) {
-    return '当前源站仍是分离流。只有在源站本身存在单文件流，或者后端合流完成后，才能得到单文件视频地址。'
+    return '当前源站仍是分离流。只有源站本身存在单文件流，或后端合流完成后，才能得到单文件视频地址。'
   }
 
   return ''
@@ -117,17 +140,21 @@ async function handleCopy(): Promise<void> {
   }
 
   try {
-    await navigator.clipboard.writeText(copyUrl.value)
-    copyFeedback.value = '已复制'
-    window.setTimeout(() => {
-      copyFeedback.value = '复制直链'
-    }, 1500)
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(copyUrl.value)
+      setCopyFeedback('已复制')
+      return
+    }
   } catch {
-    copyFeedback.value = '复制失败'
-    window.setTimeout(() => {
-      copyFeedback.value = '复制直链'
-    }, 1500)
+    // Ignore and try fallback copy below.
   }
+
+  if (fallbackCopyText(copyUrl.value)) {
+    setCopyFeedback('已复制')
+    return
+  }
+
+  setCopyFeedback('复制失败')
 }
 </script>
 
