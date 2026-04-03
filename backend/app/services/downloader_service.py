@@ -255,7 +255,7 @@ class DownloaderService:
         platform = request_options.platform
 
         if platform == Platform.YOUTUBE:
-            attempts.append(
+            youtube_attempts = [
                 ExtractionAttempt(
                     name="youtube-incomplete",
                     request_options=request_options,
@@ -266,9 +266,31 @@ class DownloaderService:
                             }
                         }
                     },
-                )
-            )
-            attempts.append(
+                ),
+                ExtractionAttempt(
+                    name="youtube-web-safari",
+                    request_options=request_options,
+                    extra_options={
+                        "extractor_args": {
+                            "youtube": {
+                                "player_client": ["web_safari"],
+                                "formats": ["incomplete"],
+                            }
+                        }
+                    },
+                ),
+                ExtractionAttempt(
+                    name="youtube-tv",
+                    request_options=request_options,
+                    extra_options={
+                        "extractor_args": {
+                            "youtube": {
+                                "player_client": ["tv"],
+                                "formats": ["incomplete"],
+                            }
+                        }
+                    },
+                ),
                 ExtractionAttempt(
                     name="youtube-ios",
                     request_options=request_options,
@@ -280,9 +302,7 @@ class DownloaderService:
                             }
                         }
                     },
-                )
-            )
-            attempts.append(
+                ),
                 ExtractionAttempt(
                     name="youtube-android",
                     request_options=request_options,
@@ -294,8 +314,22 @@ class DownloaderService:
                             }
                         }
                     },
+                ),
+            ]
+            attempts.extend(youtube_attempts)
+
+            if request_options.cookie_header or request_options.cookies_file:
+                guest_options = replace(request_options, cookie_header=None, cookies_file=None)
+                attempts.extend(
+                    [
+                        ExtractionAttempt(
+                            name=f"{attempt.name}-guest",
+                            request_options=guest_options,
+                            extra_options=attempt.extra_options,
+                        )
+                        for attempt in youtube_attempts
+                    ]
                 )
-            )
 
         if platform == Platform.TWITTER:
             if request_options.cookie_header or request_options.cookies_file:
@@ -394,14 +428,63 @@ class DownloaderService:
                 return ydl.extract_info(url, download=download)
         except Exception as exc:  # noqa: BLE001
             message = logger.errors[-1] if logger.errors else str(exc)
-            if "Requested format is not available" not in message or "format" not in options:
+            fallback_runs = self._build_extraction_fallback_runs(
+                options=options,
+                url=url,
+                download=download,
+                message=message,
+            )
+            if not fallback_runs:
                 raise
 
-            fallback_options = dict(options)
-            fallback_options.pop("format", None)
-            logger.errors.clear()
-            with yt_dlp_module.YoutubeDL(fallback_options) as ydl:
-                return ydl.extract_info(url, download=download)
+            last_exc: Exception = exc
+            for fallback_options, process in fallback_runs:
+                logger.errors.clear()
+                try:
+                    with yt_dlp_module.YoutubeDL(fallback_options) as ydl:
+                        return ydl.extract_info(url, download=download, process=process)
+                except Exception as fallback_exc:  # noqa: BLE001
+                    last_exc = fallback_exc
+                    continue
+            raise last_exc
+
+    def _build_extraction_fallback_runs(
+        self,
+        options: dict[str, Any],
+        url: str,
+        download: bool,
+        message: str,
+    ) -> list[tuple[dict[str, Any], bool]]:
+        platform = self._detect_platform(url)
+        runs: list[tuple[dict[str, Any], bool]] = []
+        seen: set[str] = set()
+
+        def add(candidate_options: dict[str, Any], process: bool) -> None:
+            marker = repr((candidate_options, process))
+            if marker in seen:
+                return
+            seen.add(marker)
+            runs.append((candidate_options, process))
+
+        if not download:
+            add(dict(options), False)
+
+        if "Requested format is not available" in message:
+            if "format" in options:
+                without_format = dict(options)
+                without_format.pop("format", None)
+                add(without_format, not (platform == Platform.YOUTUBE and not download))
+
+            if platform == Platform.YOUTUBE:
+                for fallback_format in ("best", "b"):
+                    relaxed_options = dict(options)
+                    relaxed_options["format"] = fallback_format
+                    add(relaxed_options, True)
+
+                    if not download:
+                        add(relaxed_options, False)
+
+        return runs
 
     def _build_options(
         self,
@@ -420,6 +503,7 @@ class DownloaderService:
             "quiet": True,
             "no_warnings": True,
             "overwrites": True,
+            "socket_timeout": settings.proxy_timeout_seconds,
             "cachedir": str(settings.cache_dir),
             "paths": {
                 "home": str(output_dir),
