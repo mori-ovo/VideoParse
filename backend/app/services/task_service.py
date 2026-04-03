@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -28,11 +29,38 @@ PLATFORM_PATTERNS: tuple[tuple[Platform, re.Pattern[str]], ...] = (
     (Platform.REDDIT, re.compile(r"(reddit\.com|redd\.it)", re.IGNORECASE)),
 )
 
+TERMINAL_TASK_STATUSES = {TaskStatus.SUCCESS, TaskStatus.FAILED}
+
 
 class TaskService:
     def __init__(self) -> None:
-        self._tasks: dict[str, TaskRecord] = {}
+        self._tasks: dict[str, TaskRecord] = self._load_tasks()
         self._lock = asyncio.Lock()
+
+    async def recover_tasks(self) -> None:
+        async with self._lock:
+            if not self._tasks:
+                return
+
+            now = datetime.now(timezone.utc)
+            changed = False
+            for task_id, task in list(self._tasks.items()):
+                if task.status in TERMINAL_TASK_STATUSES:
+                    continue
+
+                self._tasks[task_id] = task.model_copy(
+                    update={
+                        "status": TaskStatus.FAILED,
+                        "progress": 100,
+                        "message": "服务重启，未完成任务已标记为失败，请重新提交解析。",
+                        "error_message": task.error_message or "后端已重启，原任务执行被中断。",
+                        "updated_at": now,
+                    }
+                )
+                changed = True
+
+            if changed:
+                self._persist_tasks()
 
     async def create_task(self, payload: ParseRequest) -> TaskRecord:
         source_url = str(payload.url)
@@ -57,6 +85,7 @@ class TaskService:
 
         async with self._lock:
             self._tasks[task_id] = task
+            self._persist_tasks()
         return task
 
     async def get_task(self, task_id: str) -> TaskRecord | None:
@@ -365,7 +394,50 @@ class TaskService:
 
             updated_task = task.model_copy(update=updates)
             self._tasks[task_id] = updated_task
+            self._persist_tasks()
             return updated_task
+
+    def _load_tasks(self) -> dict[str, TaskRecord]:
+        index_path = settings.task_index_path
+        if not index_path.exists():
+            return {}
+
+        try:
+            raw_data = json.loads(index_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.exception("failed to load task index: %s", index_path)
+            return {}
+
+        if not isinstance(raw_data, list):
+            logger.warning("unexpected task index payload: %s", index_path)
+            return {}
+
+        tasks: dict[str, TaskRecord] = {}
+        for item in raw_data:
+            if not isinstance(item, dict):
+                continue
+            try:
+                task = TaskRecord.model_validate(item)
+            except Exception:  # noqa: BLE001
+                logger.exception("failed to parse task record from index")
+                continue
+            tasks[task.task_id] = task
+        return tasks
+
+    def _persist_tasks(self) -> None:
+        index_path = settings.task_index_path
+        try:
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = [
+                task.model_dump(mode="json")
+                for task in sorted(self._tasks.values(), key=lambda item: item.created_at, reverse=True)
+            ]
+            index_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            logger.exception("failed to persist task index: %s", index_path)
 
     def detect_platform(self, source_url: str) -> Platform:
         for platform, pattern in PLATFORM_PATTERNS:

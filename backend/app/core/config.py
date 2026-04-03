@@ -125,6 +125,9 @@ class Settings(BaseSettings):
     storage_index_path: Path = Field(
         default_factory=lambda: PROJECT_ROOT / "output" / ".file-index.json"
     )
+    task_index_path: Path = Field(
+        default_factory=lambda: PROJECT_ROOT / "output" / ".task-index.json"
+    )
 
     @field_validator("debug", mode="before")
     @classmethod
