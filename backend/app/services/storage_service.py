@@ -6,6 +6,7 @@ import string
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic
 from urllib.parse import quote
 
 from app.core.config import settings
@@ -27,6 +28,7 @@ class LocalStorageService:
     def __init__(self) -> None:
         self._files: dict[str, StoredFile] = self._load_index()
         self._lock = asyncio.Lock()
+        self._access_refresh_after: dict[str, float] = {}
 
     async def save_placeholder_output(self, task: TaskRecord) -> TaskResult:
         safe_title = slugify_filename(task.title) or task.platform.value
@@ -43,7 +45,7 @@ class LocalStorageService:
                 f"source_url={task.source_url}",
                 f"requires_merge={task.requires_merge}",
                 "status=success",
-                "note=当前文件为项目骨架阶段生成的占位产物，后续会替换为真实下载视频文件。",
+                "note=当前文件是项目脚手架阶段生成的占位产物，后续会替换成真实视频文件。",
             ]
         )
         file_path.write_text(content, encoding="utf-8")
@@ -109,17 +111,25 @@ class LocalStorageService:
         )
 
     async def get_file(self, file_id: str) -> StoredFile | None:
-        async with self._lock:
-            stored_file = self._files.get(file_id)
-            if stored_file is None:
-                return None
-            if not stored_file.path.exists():
-                del self._files[file_id]
-                self._persist_index()
-                return None
-            # 用访问时间刷新 mtime，避免仍在使用的输出文件被清理任务删掉。
-            stored_file.path.touch(exist_ok=True)
-            return stored_file
+        stored_file = self._files.get(file_id)
+        if stored_file is None:
+            return None
+
+        if not stored_file.path.exists():
+            async with self._lock:
+                current_file = self._files.get(file_id)
+                if current_file is None:
+                    return None
+                if current_file.path.exists():
+                    stored_file = current_file
+                else:
+                    del self._files[file_id]
+                    self._access_refresh_after.pop(file_id, None)
+                    self._persist_index()
+                    return None
+
+        self._refresh_file_access(stored_file)
+        return stored_file
 
     async def prune_missing_files(self) -> int:
         async with self._lock:
@@ -131,6 +141,7 @@ class LocalStorageService:
             ]
             for file_id in missing_file_ids:
                 del self._files[file_id]
+                self._access_refresh_after.pop(file_id, None)
 
             if missing_file_ids:
                 self._persist_index()
@@ -179,6 +190,25 @@ class LocalStorageService:
         public_file_name = f"{file_id}{suffix}" if suffix else file_id
         safe_file_name = quote(public_file_name, safe="")
         return f"{settings.api_public_origin}{settings.api_v1_prefix}/files/{safe_file_name}"
+
+    def _refresh_file_access(self, stored_file: StoredFile) -> None:
+        interval_seconds = max(0, settings.media_access_refresh_interval_seconds)
+        now = monotonic()
+        next_refresh_at = self._access_refresh_after.get(stored_file.file_id, 0.0)
+        if interval_seconds > 0 and now < next_refresh_at:
+            return
+
+        try:
+            # 高频 Range 请求只按固定间隔刷新一次 mtime，避免播放器把磁盘元数据写爆。
+            stored_file.path.touch(exist_ok=True)
+        except OSError:
+            self._access_refresh_after.pop(stored_file.file_id, None)
+            return
+
+        if interval_seconds > 0:
+            self._access_refresh_after[stored_file.file_id] = now + interval_seconds
+        else:
+            self._access_refresh_after.pop(stored_file.file_id, None)
 
     def _generate_file_id(self) -> str:
         alphabet = string.ascii_lowercase + string.digits

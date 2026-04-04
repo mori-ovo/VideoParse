@@ -8,16 +8,18 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 from fastapi import HTTPException, Request, status
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from app.core.config import settings
 from app.services.storage_service import storage_service
+from app.utils.local_file_response import build_local_file_response
 from app.utils.path import build_public_file_name
 
 logger = logging.getLogger(__name__)
@@ -96,6 +98,7 @@ class TelegramService:
         self._stop_event = asyncio.Event()
         self._lock = asyncio.Lock()
         self._files = self._load_index()
+        self._access_refresh_after: dict[str, float] = {}
         self._unique_index = self._build_unique_index(self._files)
         self._update_offset = self._load_state()
         self._last_error: str | None = None
@@ -188,11 +191,11 @@ class TelegramService:
 
         resolved = await self._resolve_target(public_file=public_file, force_refresh=False)
         if resolved.local_path is not None:
-            return FileResponse(
+            return build_local_file_response(
                 path=resolved.local_path,
                 media_type=resolved.content_type,
-                filename=resolved.file_name,
-                content_disposition_type="attachment" if as_attachment else "inline",
+                file_name=resolved.file_name,
+                as_attachment=as_attachment,
             )
 
         if resolved.remote_url is None:
@@ -254,14 +257,24 @@ class TelegramService:
         )
 
     async def get_public_file(self, file_id: str) -> TelegramPublicFile | None:
-        async with self._lock:
-            public_file = self._files.get(file_id)
-            if public_file is None:
-                return None
+        public_file = self._files.get(file_id)
+        if public_file is None:
+            return None
 
-            public_file.last_accessed_at = datetime.now(timezone.utc)
-            self._persist_index_unlocked()
+        if not self._should_refresh_public_file_access(public_file.public_id):
             return public_file
+
+        async with self._lock:
+            current_file = self._files.get(file_id)
+            if current_file is None:
+                return None
+            if not self._should_refresh_public_file_access(current_file.public_id):
+                return current_file
+
+            current_file.last_accessed_at = datetime.now(timezone.utc)
+            self._mark_public_file_access_refreshed(current_file.public_id)
+            self._persist_index_unlocked()
+            return current_file
 
     async def prune_expired_entries(self, threshold: datetime) -> int:
         async with self._lock:
@@ -278,6 +291,7 @@ class TelegramService:
                 if public_file is None:
                     continue
                 self._unique_index.pop(public_file.telegram_file_unique_id, None)
+                self._access_refresh_after.pop(public_id, None)
 
             self._persist_index_unlocked()
             return len(expired_ids)
@@ -1171,6 +1185,19 @@ class TelegramService:
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    def _should_refresh_public_file_access(self, public_id: str) -> bool:
+        interval_seconds = max(0, settings.media_access_refresh_interval_seconds)
+        if interval_seconds == 0:
+            return True
+        return monotonic() >= self._access_refresh_after.get(public_id, 0.0)
+
+    def _mark_public_file_access_refreshed(self, public_id: str) -> None:
+        interval_seconds = max(0, settings.media_access_refresh_interval_seconds)
+        if interval_seconds == 0:
+            self._access_refresh_after.pop(public_id, None)
+            return
+        self._access_refresh_after[public_id] = monotonic() + interval_seconds
 
     def _build_unique_index(self, files: dict[str, TelegramPublicFile]) -> dict[str, str]:
         index: dict[str, str] = {}

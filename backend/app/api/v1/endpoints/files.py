@@ -1,12 +1,13 @@
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request, status
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
 
 from app.services.proxy_service import proxy_service
 from app.services.storage_service import storage_service
 from app.services.task_service import task_service
 from app.services.telegram_service import telegram_service
+from app.utils.local_file_response import build_local_file_response
 
 router = APIRouter(prefix="/files", tags=["files"])
 
@@ -59,11 +60,11 @@ async def _build_virtual_file_response(
 async def download_file(request: Request, file_id: str) -> Response:
     stored_file = await storage_service.get_file(file_id)
     if stored_file is not None:
-        return FileResponse(
+        return build_local_file_response(
             path=stored_file.path,
             media_type=stored_file.content_type,
-            filename=stored_file.file_name,
-            content_disposition_type="attachment",
+            file_name=stored_file.file_name,
+            as_attachment=True,
         )
 
     virtual_response = await _build_virtual_file_response(
@@ -84,10 +85,11 @@ async def download_file(request: Request, file_id: str) -> Response:
 async def stream_file_short(request: Request, file_id: str, extension: str) -> Response:
     stored_file = await storage_service.get_file(file_id)
     if stored_file is not None:
-        return FileResponse(
+        return build_local_file_response(
             path=stored_file.path,
             media_type=stored_file.content_type,
-            content_disposition_type="inline",
+            file_name=None,
+            as_attachment=False,
         )
 
     virtual_response = await _build_virtual_file_response(
@@ -108,10 +110,11 @@ async def stream_file_short(request: Request, file_id: str, extension: str) -> R
 async def open_file(request: Request, file_id: str) -> Response:
     stored_file = await storage_service.get_file(file_id)
     if stored_file is not None:
-        return FileResponse(
+        return build_local_file_response(
             path=stored_file.path,
             media_type=stored_file.content_type,
-            content_disposition_type="inline",
+            file_name=None,
+            as_attachment=False,
         )
 
     virtual_response = await _build_virtual_file_response(
@@ -132,10 +135,11 @@ async def open_file(request: Request, file_id: str) -> Response:
 async def stream_file(request: Request, file_id: str, file_name: str) -> Response:
     stored_file = await storage_service.get_file(file_id)
     if stored_file is not None:
-        return FileResponse(
+        return build_local_file_response(
             path=stored_file.path,
             media_type=stored_file.content_type,
-            content_disposition_type="inline",
+            file_name=None,
+            as_attachment=False,
         )
 
     virtual_response = await _build_virtual_file_response(

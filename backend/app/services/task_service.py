@@ -45,6 +45,7 @@ FFMPEG_MISSING_MESSAGE = (
 class TaskService:
     def __init__(self) -> None:
         self._tasks: dict[str, TaskRecord] = self._load_tasks()
+        self._file_id_index = self._build_file_id_index(self._tasks)
         self._lock = asyncio.Lock()
 
     async def recover_tasks(self) -> None:
@@ -107,6 +108,7 @@ class TaskService:
             migrated_task = self._migrate_task_result_links(task)
             if migrated_task is not task:
                 self._tasks[task_id] = migrated_task
+                self._update_file_id_index(previous_task=task, current_task=migrated_task)
                 self._persist_tasks()
                 return migrated_task
             return task
@@ -481,10 +483,10 @@ class TaskService:
 
     async def get_task_by_file_id(self, file_id: str) -> TaskRecord | None:
         async with self._lock:
-            for task in self._tasks.values():
-                if task.result is not None and task.result.file_id == file_id:
-                    return task
-        return None
+            task_id = self._file_id_index.get(file_id)
+            if task_id is None:
+                return None
+            return self._tasks.get(task_id)
 
     def _build_direct_result(
         self,
@@ -614,6 +616,7 @@ class TaskService:
 
             updated_task = task.model_copy(update=updates)
             self._tasks[task_id] = updated_task
+            self._update_file_id_index(previous_task=task, current_task=updated_task)
             self._persist_tasks()
             return updated_task
 
@@ -680,6 +683,26 @@ class TaskService:
             )
         except OSError:
             logger.exception("failed to persist task index: %s", index_path)
+
+    def _build_file_id_index(self, tasks: dict[str, TaskRecord]) -> dict[str, str]:
+        index: dict[str, str] = {}
+        for task_id, task in tasks.items():
+            file_id = task.result.file_id if task.result is not None else None
+            if isinstance(file_id, str) and file_id:
+                index[file_id] = task_id
+        return index
+
+    def _update_file_id_index(self, previous_task: TaskRecord, current_task: TaskRecord) -> None:
+        previous_file_id = previous_task.result.file_id if previous_task.result is not None else None
+        current_file_id = current_task.result.file_id if current_task.result is not None else None
+
+        if isinstance(previous_file_id, str) and previous_file_id:
+            mapped_task_id = self._file_id_index.get(previous_file_id)
+            if mapped_task_id == previous_task.task_id and previous_file_id != current_file_id:
+                self._file_id_index.pop(previous_file_id, None)
+
+        if isinstance(current_file_id, str) and current_file_id:
+            self._file_id_index[current_file_id] = current_task.task_id
 
     def _migrate_task_result_links(self, task: TaskRecord) -> TaskRecord:
         result = task.result

@@ -200,6 +200,34 @@ class Settings(BaseSettings):
     proxy_timeout_seconds: int = 30
     proxy_chunk_size: int = 65536
     proxy_max_connections: int = 20
+    media_access_refresh_interval_seconds: int = Field(
+        default=300,
+        validation_alias=AliasChoices(
+            "MEDIA_ACCESS_REFRESH_INTERVAL_SECONDS",
+            "FILE_ACCESS_REFRESH_INTERVAL_SECONDS",
+        ),
+    )
+    internal_media_redirect_header: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "INTERNAL_MEDIA_REDIRECT_HEADER",
+            "MEDIA_INTERNAL_REDIRECT_HEADER",
+        ),
+    )
+    internal_media_redirect_root: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "INTERNAL_MEDIA_REDIRECT_ROOT",
+            "MEDIA_INTERNAL_REDIRECT_ROOT",
+        ),
+    )
+    internal_media_redirect_prefix: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "INTERNAL_MEDIA_REDIRECT_PREFIX",
+            "MEDIA_INTERNAL_REDIRECT_PREFIX",
+        ),
+    )
     # 元数据短缓存用于减少同一链接在解析、重定向、代理阶段的重复提取。
     metadata_cache_ttl_seconds: int = 300
     # 超过该时长且只有分离流时，auto 模式优先返回单链接合流代理。
@@ -260,9 +288,19 @@ class Settings(BaseSettings):
             return normalized or None
         return value
 
+    @field_validator("internal_media_redirect_header", mode="before")
+    @classmethod
+    def normalize_optional_redirect_header(cls, value: object) -> object:
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        return value
+
     @field_validator(
         "telegram_local_file_source_prefix",
         "telegram_local_file_target_prefix",
+        "internal_media_redirect_root",
+        "internal_media_redirect_prefix",
         mode="before",
     )
     @classmethod

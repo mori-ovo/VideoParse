@@ -18,6 +18,8 @@ async def health_check() -> dict[str, object]:
         "api_public_origin": settings.api_public_origin,
         "yt_dlp_available": availability.yt_dlp_available,
         "ffmpeg_available": availability.ffmpeg_available,
+        "media_access_refresh_interval_seconds": settings.media_access_refresh_interval_seconds,
+        "internal_media_redirect_enabled": bool(settings.internal_media_redirect_header),
         "default_delivery_mode": "auto",
         "supported_platforms": [
             "bilibili",
