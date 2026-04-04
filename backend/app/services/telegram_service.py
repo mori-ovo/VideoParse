@@ -665,27 +665,124 @@ class TelegramService:
         timeout_seconds: float | None = None,
         client_kind: str = "command",
     ) -> Any:
-        client = self._get_api_client(client_kind)
-        url = self._build_api_url(method)
         try:
-            response = await client.post(url, json=payload, timeout=timeout_seconds)
-            response.raise_for_status()
+            response = await self._post_api_with_retry(
+                method=method,
+                payload=payload,
+                timeout_seconds=timeout_seconds,
+                client_kind=client_kind,
+            )
         except httpx.HTTPError as exc:
             error_detail = str(exc).strip() or exc.__class__.__name__
             raise TelegramServiceError(f"Telegram API 请求失败：{error_detail}") from exc
-
         try:
             data = response.json()
         except ValueError as exc:
-            raise TelegramServiceError("Telegram API 返回了无法解析的 JSON。") from exc
+            raise TelegramServiceError("Telegram API ???????? JSON?") from exc
 
         if not isinstance(data, dict):
-            raise TelegramServiceError("Telegram API 返回格式不正确。")
+            raise TelegramServiceError("Telegram API ????????")
         if data.get("ok") is not True:
             description = data.get("description") or "unknown telegram api error"
-            raise TelegramServiceError(f"Telegram API 调用失败：{description}")
+            raise TelegramServiceError(f"Telegram API ?????{description}")
         self._clear_error()
         return data.get("result")
+
+    async def _post_api_with_retry(
+        self,
+        *,
+        method: str,
+        payload: dict[str, Any],
+        timeout_seconds: float | None,
+        client_kind: str,
+    ) -> httpx.Response:
+        url = self._build_api_url(method)
+        last_exc: httpx.HTTPError | None = None
+        for attempt in range(2):
+            client = self._get_api_client(client_kind)
+            try:
+                response = await client.post(url, json=payload, timeout=timeout_seconds)
+                response.raise_for_status()
+                return response
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                if attempt == 0 and self._should_refresh_client(exc):
+                    await self._reset_api_client(client_kind)
+                    continue
+                raise
+
+        assert last_exc is not None
+        raise last_exc
+
+    async def _open_remote_stream_with_retry(
+        self,
+        *,
+        remote_url: str,
+        request_method: str,
+        headers: dict[str, str],
+    ) -> httpx.Response:
+        last_exc: httpx.HTTPError | None = None
+        for attempt in range(2):
+            client = self._require_stream_client()
+            try:
+                built_request = client.build_request(
+                    method=request_method,
+                    url=remote_url,
+                    headers=headers,
+                )
+                return await client.send(built_request, stream=True)
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                if attempt == 0 and self._should_refresh_client(exc):
+                    await self._reset_api_client("stream")
+                    continue
+                raise
+
+        assert last_exc is not None
+        raise last_exc
+
+    def _should_refresh_client(self, exc: httpx.HTTPError) -> bool:
+        return isinstance(
+            exc,
+            (
+                httpx.ConnectError,
+                httpx.ReadError,
+                httpx.WriteError,
+                httpx.ReadTimeout,
+                httpx.WriteTimeout,
+                httpx.CloseError,
+                httpx.RemoteProtocolError,
+            ),
+        )
+
+    async def _reset_api_client(self, client_kind: str) -> None:
+        if client_kind == "poll":
+            if self._poll_client is not None:
+                await self._poll_client.aclose()
+            self._poll_client = self._build_http_client(
+                read_timeout=max(settings.proxy_timeout_seconds, settings.telegram_poll_timeout_seconds + 5),
+            )
+            logger.warning("telegram poll client was reset after request failure")
+            return
+
+        if client_kind == "file":
+            if self._file_client is not None:
+                await self._file_client.aclose()
+            self._file_client = self._build_http_client(read_timeout=settings.proxy_timeout_seconds)
+            logger.warning("telegram file client was reset after request failure")
+            return
+
+        if client_kind == "stream":
+            if self._stream_client is not None:
+                await self._stream_client.aclose()
+            self._stream_client = self._build_http_client(read_timeout=settings.proxy_timeout_seconds)
+            logger.warning("telegram stream client was reset after request failure")
+            return
+
+        if self._command_client is not None:
+            await self._command_client.aclose()
+        self._command_client = self._build_http_client(read_timeout=settings.proxy_timeout_seconds)
+        logger.warning("telegram command client was reset after request failure")
 
     def _record_error(self, message: str) -> None:
         self._last_error = message
@@ -781,6 +878,18 @@ class TelegramService:
         headers: dict[str, str] = {}
         if "range" in request.headers:
             headers["Range"] = request.headers["range"]
+
+        try:
+            return await self._open_remote_stream_with_retry(
+                remote_url=remote_url,
+                request_method=request.method.upper(),
+                headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"代理 Telegram 文件失败：{exc}",
+            ) from exc
 
         try:
             built_request = client.build_request(
@@ -943,7 +1052,8 @@ class TelegramService:
         )
         limits = httpx.Limits(
             max_connections=max(5, settings.proxy_max_connections),
-            max_keepalive_connections=max(5, settings.proxy_max_connections // 2),
+            max_keepalive_connections=0,
+            keepalive_expiry=5.0,
         )
         return httpx.AsyncClient(timeout=timeout, limits=limits)
 
