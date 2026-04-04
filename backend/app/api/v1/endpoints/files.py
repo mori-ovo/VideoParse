@@ -56,7 +56,7 @@ async def _build_virtual_file_response(
     )
 
 
-@router.get("/{file_id}/download", summary="下载任务产物")
+@router.api_route("/{file_id}/download", methods=["GET", "HEAD"], summary="下载任务产物")
 async def download_file(request: Request, file_id: str) -> Response:
     stored_file = await storage_service.get_file(file_id)
     if stored_file is not None:
@@ -81,7 +81,7 @@ async def download_file(request: Request, file_id: str) -> Response:
     )
 
 
-@router.get("/{file_id}.{extension}", summary="播放或复制短文件直链")
+@router.api_route("/{file_id}.{extension}", methods=["GET", "HEAD"], summary="播放或复制短文件直链")
 async def stream_file_short(request: Request, file_id: str, extension: str) -> Response:
     stored_file = await storage_service.get_file(file_id)
     if stored_file is not None:
@@ -106,7 +106,7 @@ async def stream_file_short(request: Request, file_id: str, extension: str) -> R
     )
 
 
-@router.get("/{file_id}", summary="获取可播放文件地址")
+@router.api_route("/{file_id}", methods=["GET", "HEAD"], summary="获取可播放文件地址")
 async def open_file(request: Request, file_id: str) -> Response:
     stored_file = await storage_service.get_file(file_id)
     if stored_file is not None:
@@ -131,7 +131,7 @@ async def open_file(request: Request, file_id: str) -> Response:
     )
 
 
-@router.get("/{file_id}/{file_name:path}", summary="播放或复制文件直链")
+@router.api_route("/{file_id}/{file_name:path}", methods=["GET", "HEAD"], summary="播放或复制文件直链")
 async def stream_file(request: Request, file_id: str, file_name: str) -> Response:
     stored_file = await storage_service.get_file(file_id)
     if stored_file is not None:
