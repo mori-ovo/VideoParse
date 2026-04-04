@@ -275,6 +275,8 @@ class TelegramService:
         if message is None:
             return
 
+        self._log_update_summary(update=update, message=message)
+
         chat_id = self._extract_chat_id(message)
         if chat_id is None:
             return
@@ -302,6 +304,14 @@ class TelegramService:
                 await self._safe_send_message(
                     chat_id=chat_id,
                     text="只支持视频消息或 mime 为 video/* 的文件。",
+                    reply_to_message_id=self._extract_message_id(message),
+                )
+                return
+
+            if self._is_forwarded_message(message):
+                await self._safe_send_message(
+                    chat_id=chat_id,
+                    text="这条转发消息里没有可直接解析的视频文件。常见原因是原消息来自其他 Bot，或该频道消息未把媒体文件一并转发出来。请直接发送视频文件，或改发能直接打开的视频链接。",
                     reply_to_message_id=self._extract_message_id(message),
                 )
             return
@@ -597,6 +607,26 @@ class TelegramService:
                 exc,
             )
 
+    def _log_update_summary(self, *, update: dict[str, Any], message: dict[str, Any]) -> None:
+        update_id = update.get("update_id")
+        chat_id = self._extract_chat_id(message)
+        message_id = self._extract_message_id(message)
+        media_kinds = [
+            key
+            for key in ("video", "document", "animation", "video_note", "audio", "voice", "photo", "sticker")
+            if key in message
+        ]
+        logger.info(
+            "telegram update received: update_id=%s chat_id=%s message_id=%s forwarded=%s media=%s via_bot=%s sender_chat=%s",
+            update_id,
+            chat_id,
+            message_id,
+            self._is_forwarded_message(message),
+            ",".join(media_kinds) if media_kinds else "-",
+            isinstance(message.get("via_bot"), dict),
+            isinstance(message.get("sender_chat"), dict),
+        )
+
     def _is_timeout_error(self, exc: BaseException) -> bool:
         current: BaseException | None = exc
         visited: set[int] = set()
@@ -779,6 +809,9 @@ class TelegramService:
         if isinstance(message_id, int):
             return message_id
         return None
+
+    def _is_forwarded_message(self, message: dict[str, Any]) -> bool:
+        return isinstance(message.get("forward_origin"), dict)
 
     def _is_chat_allowed(self, chat_id: int) -> bool:
         allowed_chat_ids = settings.telegram_allowed_chat_id_set
