@@ -125,7 +125,8 @@ class TelegramService:
     async def stop(self) -> None:
         if self._polling_task is not None:
             self._stop_event.set()
-            await self._polling_task
+            self._polling_task.cancel()
+            await asyncio.gather(self._polling_task, return_exceptions=True)
             self._polling_task = None
 
         if self._update_tasks:
@@ -147,6 +148,7 @@ class TelegramService:
             "configured": settings.telegram_bot_configured,
             "polling_enabled": settings.telegram_polling_enabled,
             "polling_running": self._polling_task is not None and not self._polling_task.done(),
+            "prefetch_enabled": settings.telegram_file_prefetch_enabled,
             "allowed_chat_ids_configured": bool(settings.telegram_allowed_chat_id_set),
             "registered_files": len(self._files),
             "bot_api_base": settings.telegram_bot_api_base,
@@ -260,7 +262,7 @@ class TelegramService:
             self._persist_index_unlocked()
             return len(expired_ids)
 
-    async def get_link_by_message(self, message: dict[str, Any]) -> str | None:
+    async def get_link_by_message(self, message: dict[str, Any]) -> tuple[str, str] | None:
         media = self._extract_supported_media(message)
         if media is None:
             return None
@@ -275,8 +277,8 @@ class TelegramService:
             chat_id=chat_id,
             message_id=message_id,
         )
-        self._schedule_file_path_prefetch(public_id=public_file.public_id)
-        return storage_service.build_stream_url(public_file.public_id, public_file.file_name)
+        link = storage_service.build_stream_url(public_file.public_id, public_file.file_name)
+        return link, public_file.public_id
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         message = self._extract_update_message(update)
@@ -306,8 +308,8 @@ class TelegramService:
             )
             return
 
-        link = await self.get_link_by_message(message)
-        if link is None:
+        link_result = await self.get_link_by_message(message)
+        if link_result is None:
             if self._contains_media_payload(message):
                 await self._safe_send_message(
                     chat_id=chat_id,
@@ -324,11 +326,15 @@ class TelegramService:
                 )
             return
 
+        link, public_id = link_result
         await self._safe_send_message(
             chat_id=chat_id,
             text=link,
             reply_to_message_id=self._extract_message_id(message),
         )
+
+        if settings.telegram_file_prefetch_enabled:
+            self._schedule_file_path_prefetch(public_id=public_id)
 
     async def _poll_updates_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -361,6 +367,8 @@ class TelegramService:
                 self._stop_event.wait(),
                 timeout=max(0, settings.telegram_poll_interval_seconds),
             )
+        except asyncio.CancelledError:
+            return
         except TimeoutError:
             return
 

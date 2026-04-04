@@ -144,6 +144,10 @@ class Settings(BaseSettings):
         default=180,
         validation_alias=AliasChoices("TELEGRAM_FILE_TIMEOUT_SECONDS", "TG_FILE_TIMEOUT_SECONDS"),
     )
+    telegram_file_prefetch_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("TELEGRAM_FILE_PREFETCH_ENABLED", "TG_FILE_PREFETCH_ENABLED"),
+    )
     telegram_local_file_source_prefix: str | None = Field(
         default=None,
         validation_alias=AliasChoices(
