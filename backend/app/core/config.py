@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 
 from pydantic import AliasChoices, Field, field_validator
@@ -132,6 +133,18 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("TELEGRAM_POLLING_ENABLED", "TG_POLLING_ENABLED"),
     )
+    telegram_update_mode: str = Field(
+        default="polling",
+        validation_alias=AliasChoices("TELEGRAM_UPDATE_MODE", "TG_UPDATE_MODE"),
+    )
+    telegram_webhook_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TELEGRAM_WEBHOOK_URL", "TG_WEBHOOK_URL"),
+    )
+    telegram_webhook_secret: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TELEGRAM_WEBHOOK_SECRET", "TG_WEBHOOK_SECRET"),
+    )
     telegram_poll_timeout_seconds: int = Field(
         default=20,
         validation_alias=AliasChoices("TELEGRAM_POLL_TIMEOUT_SECONDS", "TG_POLL_TIMEOUT_SECONDS"),
@@ -228,6 +241,25 @@ class Settings(BaseSettings):
             return value.strip().rstrip("/")
         return value
 
+    @field_validator("telegram_update_mode", mode="before")
+    @classmethod
+    def normalize_telegram_update_mode(cls, value: object) -> object:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"poll", "polling"}:
+                return "polling"
+            if normalized in {"hook", "webhook"}:
+                return "webhook"
+        return value
+
+    @field_validator("telegram_webhook_url", "telegram_webhook_secret", mode="before")
+    @classmethod
+    def normalize_optional_telegram_text(cls, value: object) -> object:
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        return value
+
     @field_validator(
         "telegram_local_file_source_prefix",
         "telegram_local_file_target_prefix",
@@ -263,6 +295,21 @@ class Settings(BaseSettings):
     @property
     def telegram_bot_configured(self) -> bool:
         return isinstance(self.telegram_bot_token, str) and bool(self.telegram_bot_token.strip())
+
+    @property
+    def telegram_webhook_target_url(self) -> str:
+        if isinstance(self.telegram_webhook_url, str) and self.telegram_webhook_url:
+            return self.telegram_webhook_url
+        return f"{self.api_public_origin}{self.api_v1_prefix}/telegram/webhook"
+
+    @property
+    def telegram_webhook_secret_value(self) -> str | None:
+        if isinstance(self.telegram_webhook_secret, str) and self.telegram_webhook_secret:
+            return self.telegram_webhook_secret
+        if not self.telegram_bot_configured:
+            return None
+        digest = hashlib.sha256(self.telegram_bot_token.strip().encode("utf-8")).hexdigest()
+        return digest[:32]
 
     @property
     def runtime_directories(self) -> tuple[Path, Path, Path]:

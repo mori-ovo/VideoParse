@@ -113,13 +113,20 @@ class TelegramService:
         if self._stream_client is None:
             self._stream_client = self._build_http_client(read_timeout=settings.proxy_timeout_seconds)
 
-        if not settings.telegram_bot_configured or not settings.telegram_polling_enabled:
+        if not settings.telegram_bot_configured:
+            return
+
+        if settings.telegram_update_mode == "polling" and not settings.telegram_polling_enabled:
             return
 
         if self._polling_task is not None and not self._polling_task.done():
             return
 
         self._stop_event = asyncio.Event()
+        if settings.telegram_update_mode == "webhook":
+            await self._configure_webhook()
+            return
+
         await self._delete_webhook()
         self._polling_task = asyncio.create_task(self._poll_updates_loop())
 
@@ -156,9 +163,12 @@ class TelegramService:
     def status(self) -> dict[str, object]:
         return {
             "configured": settings.telegram_bot_configured,
+            "update_mode": settings.telegram_update_mode,
             "polling_enabled": settings.telegram_polling_enabled,
             "polling_running": self._polling_task is not None and not self._polling_task.done(),
             "prefetch_enabled": settings.telegram_file_prefetch_enabled,
+            "webhook_url": settings.telegram_webhook_target_url if settings.telegram_bot_configured else None,
+            "webhook_secret_configured": settings.telegram_webhook_secret_value is not None,
             "allowed_chat_ids_configured": bool(settings.telegram_allowed_chat_id_set),
             "registered_files": len(self._files),
             "bot_api_base": settings.telegram_bot_api_base,
@@ -346,6 +356,25 @@ class TelegramService:
         if settings.telegram_file_prefetch_enabled:
             self._schedule_file_path_prefetch(public_id=public_id)
 
+    async def handle_webhook_update(
+        self,
+        update: dict[str, Any],
+        *,
+        secret_token: str | None,
+    ) -> None:
+        if settings.telegram_update_mode != "webhook":
+            raise TelegramServiceError("Telegram webhook mode is not enabled.")
+        if not self._is_valid_webhook_secret(secret_token):
+            raise TelegramServiceError("Telegram webhook secret is invalid.")
+
+        update_id = update.get("update_id")
+        self._schedule_update_handling(update=update, update_id=update_id)
+
+    def _schedule_update_handling(self, *, update: dict[str, Any], update_id: object) -> None:
+        task = asyncio.create_task(self._handle_update_safe(update=update, update_id=update_id))
+        self._update_tasks.add(task)
+        task.add_done_callback(self._update_tasks.discard)
+
     async def _poll_updates_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
@@ -367,9 +396,7 @@ class TelegramService:
                 if isinstance(update_id, int):
                     self._update_offset = max(self._update_offset, update_id + 1)
                     self._persist_state()
-                task = asyncio.create_task(self._handle_update_safe(update=update, update_id=update_id))
-                self._update_tasks.add(task)
-                task.add_done_callback(self._update_tasks.discard)
+                self._schedule_update_handling(update=update, update_id=update_id)
 
     async def _sleep_until_next_poll(self) -> None:
         try:
@@ -420,6 +447,34 @@ class TelegramService:
                 "Telegram Bot API is unreachable at %s; webhook reset skipped. Check TELEGRAM_BOT_API_BASE or start telegram-bot-api.",
                 settings.telegram_bot_api_base,
             )
+
+    async def _configure_webhook(self) -> None:
+        payload: dict[str, Any] = {
+            "url": settings.telegram_webhook_target_url,
+            "drop_pending_updates": False,
+            "allowed_updates": [
+                "message",
+                "edited_message",
+                "channel_post",
+                "edited_channel_post",
+            ],
+        }
+        secret_token = settings.telegram_webhook_secret_value
+        if isinstance(secret_token, str) and secret_token:
+            payload["secret_token"] = secret_token
+
+        await self._call_api(
+            method="setWebhook",
+            payload=payload,
+            client_kind="command",
+        )
+        self._clear_error()
+
+    def _is_valid_webhook_secret(self, secret_token: str | None) -> bool:
+        expected = settings.telegram_webhook_secret_value
+        if not isinstance(expected, str) or not expected:
+            return True
+        return isinstance(secret_token, str) and secret_token == expected
 
     async def _handle_update_safe(self, update: dict[str, Any], update_id: object) -> None:
         try:
