@@ -470,16 +470,18 @@ class TelegramService:
             file_path = await self._refresh_file_path(public_file)
 
         if isinstance(file_path, str) and file_path:
-            local_path = Path(file_path)
-            # 本地 Bot API 在 local 模式下可能直接返回绝对路径，这种情况优先走本地文件响应。
-            if local_path.is_absolute() and local_path.exists():
+            local_path = self._resolve_accessible_local_path(file_path)
+            # 本地 Bot API 在 local 模式下可能直接返回绝对路径。
+            # 如果 telegram-bot-api 跑在 Docker 容器里，这里会先尝试把容器路径映射到宿主机路径。
+            if local_path is not None:
                 return TelegramResolvedTarget(
                     file_name=public_file.file_name,
                     content_type=public_file.content_type,
                     local_path=local_path,
                 )
 
-            if not local_path.is_absolute():
+            raw_local_path = Path(file_path)
+            if not raw_local_path.is_absolute():
                 return TelegramResolvedTarget(
                     file_name=public_file.file_name,
                     content_type=public_file.content_type,
@@ -490,6 +492,35 @@ class TelegramService:
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Telegram 本地文件路径不可访问，请确认 Bot API 与当前服务部署在同一台机器。",
         )
+
+    def _resolve_accessible_local_path(self, file_path: str) -> Path | None:
+        local_path = Path(file_path)
+        if local_path.is_absolute() and local_path.exists():
+            return local_path
+
+        mapped_path = self._map_local_file_path(local_path)
+        if mapped_path is not None and mapped_path.exists():
+            return mapped_path
+        return None
+
+    def _map_local_file_path(self, local_path: Path) -> Path | None:
+        if not local_path.is_absolute():
+            return None
+
+        source_prefix = settings.telegram_local_file_source_prefix
+        target_prefix = settings.telegram_local_file_target_prefix
+        if not source_prefix or not target_prefix:
+            return None
+
+        normalized_path = local_path.as_posix()
+        if normalized_path != source_prefix and not normalized_path.startswith(f"{source_prefix}/"):
+            return None
+
+        relative_path = normalized_path[len(source_prefix):].lstrip("/")
+        target_path = Path(target_prefix)
+        if not relative_path:
+            return target_path
+        return target_path / relative_path
 
     async def _refresh_file_path(self, public_file: TelegramPublicFile) -> str | None:
         file_path = await self._get_file_path(public_file.telegram_file_id)

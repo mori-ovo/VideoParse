@@ -144,6 +144,20 @@ class Settings(BaseSettings):
         default=180,
         validation_alias=AliasChoices("TELEGRAM_FILE_TIMEOUT_SECONDS", "TG_FILE_TIMEOUT_SECONDS"),
     )
+    telegram_local_file_source_prefix: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TELEGRAM_LOCAL_FILE_SOURCE_PREFIX",
+            "TG_LOCAL_FILE_SOURCE_PREFIX",
+        ),
+    )
+    telegram_local_file_target_prefix: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TELEGRAM_LOCAL_FILE_TARGET_PREFIX",
+            "TG_LOCAL_FILE_TARGET_PREFIX",
+        ),
+    )
     telegram_allowed_chat_ids: str | None = Field(
         default=None,
         validation_alias=AliasChoices("TELEGRAM_ALLOWED_CHAT_IDS", "TG_ALLOWED_CHAT_IDS"),
@@ -208,6 +222,18 @@ class Settings(BaseSettings):
     def normalize_telegram_bot_api_base(cls, value: object) -> object:
         if isinstance(value, str):
             return value.strip().rstrip("/")
+        return value
+
+    @field_validator(
+        "telegram_local_file_source_prefix",
+        "telegram_local_file_target_prefix",
+        mode="before",
+    )
+    @classmethod
+    def normalize_optional_path_prefix(cls, value: object) -> object:
+        if isinstance(value, str):
+            normalized = value.strip().rstrip("/")
+            return normalized or None
         return value
 
     @property
