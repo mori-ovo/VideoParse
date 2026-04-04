@@ -293,7 +293,7 @@ class TelegramService:
 
         link = await self.get_link_by_message(message)
         if link is None:
-            if "video" in message or "document" in message:
+            if self._contains_media_payload(message):
                 await self._safe_send_message(
                     chat_id=chat_id,
                     text="只支持视频消息或 mime 为 video/* 的文件。",
@@ -597,10 +597,32 @@ class TelegramService:
         if isinstance(video, dict):
             return self._build_incoming_media(video)
 
+        animation = message.get("animation")
+        if isinstance(animation, dict):
+            return self._build_incoming_media(animation)
+
+        video_note = message.get("video_note")
+        if isinstance(video_note, dict):
+            return self._build_incoming_media(video_note)
+
         document = message.get("document")
         if isinstance(document, dict) and self._is_supported_video_document(document):
             return self._build_incoming_media(document)
         return None
+
+    def _contains_media_payload(self, message: dict[str, Any]) -> bool:
+        # Telegram 里很多“看起来像视频”的资源，实际会以 animation 或 video_note 下发。
+        media_keys = {
+            "video",
+            "document",
+            "animation",
+            "video_note",
+            "audio",
+            "voice",
+            "photo",
+            "sticker",
+        }
+        return any(key in message for key in media_keys)
 
     def _build_incoming_media(self, payload: dict[str, Any]) -> TelegramIncomingMedia | None:
         telegram_file_id = payload.get("file_id")
