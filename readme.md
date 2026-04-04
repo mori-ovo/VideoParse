@@ -1,45 +1,59 @@
 # VideoParse
 
-一个面向少量内部使用场景的万能视频解析项目，采用前后端分离结构。
+VideoParse 是一个面向自部署场景的视频解析服务。
 
-当前目标不是“做一个大规模下载站”，而是“优先拿到可用直链；如果源站只有音视频分离流，就自动下载并合成为单文件，再给出项目自己的可访问地址”，方便转发到 `VRChat` 之类只认视频 URL 的场景。
+它的目标不是做“全网万能下载站”，而是尽可能把常见视频页面转换成可直接使用的媒体地址；如果源站只提供音视频分离流，后端会在必要时下载并合并，再对外生成稳定的项目链接。
 
-支持平台：
+## 特性
 
-- `Bilibili`
-- `抖音`
-- `Twitter / X`
-- `YouTube`
-- `Reddit`
+- 支持常见视频站点解析
+- 优先返回可直接使用的媒体地址
+- 对分离流自动下载并通过 `ffmpeg` 合并
+- 提供稳定的项目域名短链，例如 `/api/v1/files/xxxxxxxxxxxx.mp4`
+- 内置代理转发，适合外部播放器或只接受视频 URL 的场景
+- 支持 Telegram Bot 收视频后返回项目短链
+- 支持缓存、输出文件和索引的定时清理
 
-## 核心策略
+## 当前支持
 
-当前默认流程已经改为 `auto`：
+URL 解析：
 
-1. 用户提交视频页面链接。
-2. 后端先用 `yt-dlp` 提取媒体信息。
-3. 如果源站本身就有单文件直链，直接返回可复制地址。
-4. 如果源站只有音视频分离流，后端自动下载并通过 `ffmpeg` 合流。
-5. 最终前端只保留两个主要动作：
-   - `复制直链`
-   - `下载视频`
+- Bilibili
+- 抖音
+- Twitter / X
+- YouTube
+- Reddit
+- Iwara
 
-这套策略比“无脑全量下载”更适合 `1C1G Ubuntu` 小服务器，也更符合“拿链接转发”的项目目标。
+附加输入方式：
 
-## 当前项目结构
+- Telegram Bot 转发或发送视频文件
+
+## 工作方式
+
+默认模式为 `auto`：
+
+1. 提交一个视频页面链接。
+2. 后端先提取媒体信息。
+3. 如果源站存在可直接使用的单文件媒体地址，直接返回。
+4. 如果只有音视频分离流，后端下载并合并为单个文件。
+5. 最终返回项目自己的可访问链接或下载地址。
+
+这个策略比“无条件全量下载”更适合小规格服务器，也更适合拿链接转发给外部播放器。
+
+## 技术栈
+
+- Backend: FastAPI
+- Frontend: Vue 3 + Vite + Pinia
+- Media extraction: `yt-dlp`
+- Media merge: `ffmpeg`
+- HTTP client: `httpx`
+
+## 目录结构
 
 ```text
 VideoParse/
-├─ frontend/                    # Vue 3 + Vite 前端
-│  ├─ src/
-│  │  ├─ api/
-│  │  ├─ components/
-│  │  ├─ pages/
-│  │  ├─ stores/
-│  │  └─ types/
-│  ├─ package.json
-│  └─ vite.config.ts
-├─ backend/                     # FastAPI 后端
+├─ backend/
 │  ├─ app/
 │  │  ├─ api/
 │  │  ├─ core/
@@ -49,228 +63,168 @@ VideoParse/
 │  ├─ .env.example
 │  ├─ main.py
 │  └─ requirements.txt
-├─ cache/                       # yt-dlp / 代理缓存
-├─ temp/                        # 临时下载目录
-├─ output/                      # 合流后的最终文件
-├─ docs/
-└─ readme.md
+├─ frontend/
+│  ├─ src/
+│  ├─ package.json
+│  └─ vite.config.ts
+├─ cache/
+├─ output/
+├─ temp/
+├─ deploy/
+└─ docs/
 ```
 
-## 结果类型说明
+## 环境要求
 
-后端仍然保留 3 种结果类型，但前端已经按统一流程整合：
+- Python 3.10+
+- Node.js 18+
+- `ffmpeg`
+- `yt-dlp`
 
-### `direct`
+## 快速开始
 
-表示拿到了单文件媒体直链。
+### 1. 启动后端
 
-常见字段：
-
-- `direct_url`
-- `redirect_url`
-- `proxy_url`
-
-### `split_streams`
-
-表示源站只提供分离流。
-
-常见字段：
-
-- `video_url`
-- `audio_url`
-- `video_proxy_url`
-- `audio_proxy_url`
-
-注意：在当前默认 `auto` 模式下，这种情况通常不会直接停在这里，而是会继续进入自动下载和合流。
-
-### `download`
-
-表示后端已经把最终单文件视频准备好，并返回项目自己的下载地址。
-
-常见字段：
-
-- `file_id`
-- `download_url`
-
-## 为什么 B 站经常拿不到“原始单文件直链”
-
-这不是项目单独造成的，而是很多 B 站视频本来就是音视频分离流。
-
-也就是说：
-
-- 你可以解析成功
-- 也可以拿到视频流和音频流
-- 但源站本身未必提供一个天然的单文件 URL
-
-所以当前项目的处理方式是：
-
-- 优先尝试单文件直链
-- 如果没有，就自动下载分离流
-- 使用 `ffmpeg` 合并成单文件
-- 再返回本项目自己的可访问地址
-
-## 平台登录态与代理策略
-
-### Bilibili
-
-建议优先配置：
-
-```env
-BILIBILI_PROXY=socks5://127.0.0.1:1080
-BILIBILI_SESSDATA=你的 SESSDATA
-BILIBILI_BILI_JCT=你的 bili_jct
-BILIBILI_DEDEUSERID=你的 DedeUserID
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-说明：
+Windows PowerShell 示例：
 
-- B 站对服务器 IP 风控较敏感，`412` 很常见。
-- 只在 `Bilibili` 上单独走 `SOCKS5`，比全站代理更省资源。
-- 如果只有 `SESSDATA`，也可以先试；但完整登录态通常更稳。
-
-### YouTube
-
-建议配置完整 Cookie 字符串：
-
-```env
-YOUTUBE_COOKIES=完整的 YouTube Cookie 串
+```powershell
+cd backend
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
+python -m uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-说明：
+### 2. 启动前端
 
-- YouTube 的登录校验比较严格。
-- 手动只填一两个字段往往不稳定。
-- 当前项目仍支持旧的文件方式和旧变量名，但主模板已经不再强调它们。
-
-### Twitter / X
-
-优先使用最简配置：
-
-```env
-TWITTER_AUTH_TOKEN=你的 auth_token
-TWITTER_CT0=你的 ct0
+```bash
+cd frontend
+npm install
+npm run dev
 ```
 
-说明：
+### 3. 构建前端
 
-- 你的很多场景只靠 `auth_token` 也可能成功。
-- 但如果推文涉及敏感内容、登录可见内容，`ct0` 一并配置通常更稳。
-- 如果你已经拿到了完整 Cookie 串，也可以填：
-
-```env
-TWITTER_COOKIES=auth_token=...; ct0=...
+```bash
+cd frontend
+npm run build
 ```
 
-## 推荐的 `.env` 最小配置
+## 最小配置
 
-生产环境示例：
+建议至少配置以下项：
 
 ```env
 APP_NAME=VideoParse API
 DEBUG=false
 
-FRONTEND_ORIGIN=https://moriparse.space
-API_PUBLIC_ORIGIN=https://moriparse.space
+FRONTEND_ORIGIN=https://your-domain
+API_PUBLIC_ORIGIN=https://your-domain
 
-CLEANUP_INTERVAL_HOURS=6
-CLEANUP_RETENTION_HOURS=6
-
-USER_AGENT=
-PROXY=
-
-BILIBILI_PROXY=socks5://127.0.0.1:1080
-BILIBILI_SESSDATA=
-BILIBILI_BILI_JCT=
-BILIBILI_DEDEUSERID=
-
-YOUTUBE_COOKIES=
-
-TWITTER_AUTH_TOKEN=
-TWITTER_CT0=
+CLEANUP_INTERVAL_HOURS=4
+CLEANUP_RETENTION_HOURS=4
 
 DOWNLOAD_FORMAT=bestvideo*[height<=1080]+bestaudio/best[height<=1080]/best
 MERGE_OUTPUT_FORMAT=mp4
 ```
 
-说明：
+完整变量见 [`backend/.env.example`](backend/.env.example)。
 
-- `FRONTEND_ORIGIN` 和 `API_PUBLIC_ORIGIN` 在你走反向代理到同一主域名时，通常都不需要再带 `:5173` / `:8000`。
-- 只要外部用户最终访问的是 `https://moriparse.space`，这里就应该写这个公开地址。
-- 端口只用于本机服务监听，不应该继续出现在对外返回的下载地址里。
+## 平台相关配置
 
-## 1C1G 服务器优化思路
+部分平台对登录态、Cookie 或代理比较敏感，生产环境通常需要按平台单独配置。
 
-当前默认实现已经按小机器做了取舍：
+### Bilibili
 
-- 默认只在必要时下载，不再一上来就跑全量下载。
-- 默认下载格式限制到 `1080p`，避免高码率素材把 CPU、磁盘和带宽打满。
-- 只有需要单文件成品时才走 `ffmpeg` 合流。
-- 缓存和临时目录每 `6` 小时自动清理一次。
-- 任务状态只保存在内存中，避免额外引入 Redis / 数据库。
-
-仍需注意：
-
-- `output/` 里的最终文件不会被当前清理器自动删除。
-- 如果后续下载型任务多了，建议再补一个 `output/` 生命周期清理策略。
-
-## 常见问题
-
-### 1. 为什么健康检查是正常的，但前端报解析失败？
-
-先检查反向代理是否把 `/api/` 指向了后端，而不是错误地回退到了前端静态页。
-
-正确现象应该是：
-
-```bash
-curl https://your-domain/api/v1/health
-```
-
-返回 JSON，而不是 `index.html`。
-
-### 2. 为什么 YouTube 报 `Requested format is not available`？
-
-当前后端已经加入格式回退逻辑：
-
-- 先按配置的下载格式尝试
-- 如果目标格式不可用，再自动回退到更宽松的格式
-
-同时默认格式已改得更保守，适合小机器。
-
-### 3. 为什么 Twitter 明明有视频，却说 `No video could be found in this tweet`？
-
-常见原因不是“真的没视频”，而是：
-
-- 该推文需要登录后才可见
-- 该内容是敏感内容
-- 当前 Cookie 不完整
-- 当前账号本身没有权限看到完整媒体
-
-优先先试：
+常见可选项：
 
 ```env
-TWITTER_AUTH_TOKEN=...
-TWITTER_CT0=...
+BILIBILI_PROXY=
+BILIBILI_SESSDATA=
+BILIBILI_BILI_JCT=
+BILIBILI_DEDEUSERID=
 ```
 
-### 4. 为什么 Bilibili 会报 `412`？
+### YouTube
 
-这通常是平台风控，不是前端问题。
+常见可选项：
 
-优先检查：
+```env
+YOUTUBE_COOKIES=
+YOUTUBE_PLAYER_CLIENT=
+YOUTUBE_PO_TOKEN=
+```
 
-- `BILIBILI_PROXY`
-- `BILIBILI_SESSDATA`
-- `BILIBILI_BILI_JCT`
-- `BILIBILI_DEDEUSERID`
+### Twitter / X
 
-## 接口概览
+常见可选项：
 
-### 基础接口
+```env
+TWITTER_AUTH_TOKEN=
+TWITTER_CT0=
+TWITTER_COOKIES=
+```
+
+### Iwara
+
+常见可选项：
+
+```env
+IWARA_AUTHORIZATION=
+IWARA_COOKIES=
+IWARA_USER_AGENT=
+```
+
+## Telegram Bot 集成
+
+项目支持通过 Telegram Bot 接收视频并返回项目短链。
+
+典型流程：
+
+1. 发送或转发视频给 Bot
+2. 后端记录 Telegram 文件信息
+3. Bot 回复项目域名下的短链
+4. 外部播放器直接访问该短链
+
+相关配置：
+
+```env
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_BOT_API_BASE=http://127.0.0.1:8081
+TELEGRAM_POLLING_ENABLED=true
+TELEGRAM_POLL_TIMEOUT_SECONDS=20
+TELEGRAM_POLL_INTERVAL_SECONDS=2
+TELEGRAM_FILE_TIMEOUT_SECONDS=180
+TELEGRAM_FILE_PREFETCH_ENABLED=false
+TELEGRAM_LOCAL_FILE_SOURCE_PREFIX=
+TELEGRAM_LOCAL_FILE_TARGET_PREFIX=
+TELEGRAM_ALLOWED_CHAT_IDS=
+```
+
+说明：
+
+- `TELEGRAM_BOT_API_BASE` 默认为本地 Bot API
+- 如果 `telegram-bot-api` 跑在 Docker 中，而后端跑在宿主机上，需要配置本地文件路径映射
+- 生产环境建议限制 `TELEGRAM_ALLOWED_CHAT_IDS`
+
+## API 概览
+
+基础接口：
 
 - `GET /api/v1/health`
 - `GET /api/v1/history`
 
-### 解析相关
+解析接口：
 
 - `POST /api/v1/parse`
 - `GET /api/v1/tasks/{task_id}`
@@ -278,11 +232,13 @@ TWITTER_CT0=...
 - `GET /api/v1/tasks/{task_id}/redirect?kind=single|video|audio`
 - `GET /api/v1/tasks/{task_id}/proxy?kind=single|video|audio`
 
-### 文件下载
+文件接口：
 
 - `GET /api/v1/files/{file_id}/download`
+- `GET /api/v1/files/{file_id}.{ext}`
+- `GET /api/v1/files/{file_id}/{file_name}`
 
-## 请求示例
+示例请求：
 
 ```http
 POST /api/v1/parse
@@ -294,48 +250,42 @@ Content-Type: application/json
 }
 ```
 
-## 开发运行
+## 返回结果
 
-### 后端
+后端当前有三种结果类型：
 
-```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8000
-```
+- `direct`: 直接可用的媒体地址
+- `split_streams`: 音视频分离流
+- `download`: 后端已生成可访问的成品文件
 
-### 前端
+在默认的 `auto` 模式下，接口会尽量把分离流进一步处理成更稳定的单文件结果。
 
-```bash
-cd frontend
-npm install
-npm run dev
-```
+## 部署建议
 
-### 生产构建
+- 前后端建议放在同一域名下，通过反向代理转发 `/api/`
+- 对外返回的地址应与 `API_PUBLIC_ORIGIN` 保持一致
+- `cache/`、`temp/`、`output/` 需要可写权限
+- 如果使用 Telegram 本地 Bot API，建议与后端部署在同一台机器
 
-```bash
-cd frontend
-npm run build
-```
+## 限制说明
 
-## 当前阶段结论
+- 本项目不以支持所有站点为目标
+- 某些平台依赖登录态、Cookie、代理或地区网络环境
+- 受保护内容、私有资源或 DRM 内容不在主要支持范围内
+- 第三方站点结构变更后，解析规则可能需要同步调整
 
-这个项目现在已经不是纯规划状态，而是一个围绕“直链优先、必要时自动合流”的基础可运行版本。
+## 开发状态
 
-已完成的方向：
+当前版本已经可以用于日常自部署使用，重点放在：
 
-- 已接入真实下载器 `yt-dlp`
-- 已支持 `ffmpeg` 自动合流
-- 已支持 Bilibili 单独走 `SOCKS5`
-- 已支持 YouTube / Twitter / Bilibili 通过 `.env` 注入登录态
-- 已把缓存清理固定为每 `6` 小时一次
-- 已把前端主要操作收敛为“复制直链”和“下载视频”
+- 常见站点的视频解析
+- 单文件结果优先
+- 小规格服务器可承受的资源消耗
+- Telegram Bot 短链分发
 
-下一阶段如果继续做，优先级建议是：
+后续更适合继续完善的方向：
 
-1. 给 `output/` 加生命周期清理
-2. 增加任务持久化
-3. 根据不同平台补更细的登录态检查和错误提示
+- 回归测试
+- 任务持久化
+- 更细的日志和监控
+- 新平台适配器的标准化接入
