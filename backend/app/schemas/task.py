@@ -10,6 +10,7 @@ class Platform(str, Enum):
     TWITTER = "twitter"
     YOUTUBE = "youtube"
     REDDIT = "reddit"
+    IWARA = "iwara"
 
 
 class DeliveryMode(str, Enum):

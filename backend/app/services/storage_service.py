@@ -117,7 +117,24 @@ class LocalStorageService:
                 del self._files[file_id]
                 self._persist_index()
                 return None
+            # 用访问时间刷新 mtime，避免仍在使用的输出文件被清理任务删掉。
+            stored_file.path.touch(exist_ok=True)
             return stored_file
+
+    async def prune_missing_files(self) -> int:
+        async with self._lock:
+            # output 被清理后，索引里的悬空记录也要同步移除。
+            missing_file_ids = [
+                file_id
+                for file_id, stored_file in self._files.items()
+                if not stored_file.path.exists()
+            ]
+            for file_id in missing_file_ids:
+                del self._files[file_id]
+
+            if missing_file_ids:
+                self._persist_index()
+            return len(missing_file_ids)
 
     def _load_index(self) -> dict[str, StoredFile]:
         index_path = settings.storage_index_path

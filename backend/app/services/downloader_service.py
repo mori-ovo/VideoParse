@@ -4,7 +4,9 @@ import logging
 import mimetypes
 import shutil
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -85,6 +87,7 @@ class PlatformRequestOptions:
     cookie_header: str | None
     cookies_file: Path | None
     user_agent: str | None
+    authorization_header: str | None
 
 
 @dataclass(frozen=True)
@@ -92,6 +95,12 @@ class ExtractionAttempt:
     name: str
     request_options: PlatformRequestOptions
     extra_options: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class CachedExtractedMedia:
+    media: ExtractedMedia
+    expires_at: datetime
 
 
 class YtDlpLogger:
@@ -112,17 +121,29 @@ class YtDlpLogger:
 
 
 class DownloaderService:
+    def __init__(self) -> None:
+        # 同一个链接在短时间内往往会被解析多次，这里做内存级 TTL 缓存。
+        self._metadata_cache: dict[str, CachedExtractedMedia] = {}
+        self._metadata_cache_lock = Lock()
+
     def availability(self) -> DownloaderAvailability:
         return DownloaderAvailability(
             yt_dlp_available=self._is_yt_dlp_available(),
             ffmpeg_available=self._is_ffmpeg_available(),
         )
 
-    async def extract_metadata(self, url: str) -> ExtractedMedia:
-        return await asyncio.to_thread(self._extract_metadata_sync, url)
+    async def extract_metadata(self, url: str, force_refresh: bool = False) -> ExtractedMedia:
+        if not force_refresh:
+            cached = self._get_cached_metadata(url)
+            if cached is not None:
+                return cached
 
-    async def resolve_media_target(self, url: str, kind: str) -> MediaTarget:
-        metadata = await self.extract_metadata(url)
+        extracted = await asyncio.to_thread(self._extract_metadata_sync, url)
+        self._store_cached_metadata(url, extracted)
+        return extracted
+
+    async def resolve_media_target(self, url: str, kind: str, force_refresh: bool = False) -> MediaTarget:
+        metadata = await self.extract_metadata(url, force_refresh=force_refresh)
         if kind == "single" and metadata.direct_url:
             return MediaTarget(url=metadata.direct_url, headers=metadata.direct_headers)
         if kind == "video" and metadata.video_url:
@@ -148,9 +169,8 @@ class DownloaderService:
     def _extract_metadata_sync(self, url: str) -> ExtractedMedia:
         platform = self._detect_platform(url)
 
-        # For YouTube, a third-party handoff is currently the most reliable path on
-        # low-resource servers that often hit bot checks or JS runtime issues.
-        if platform == Platform.YOUTUBE:
+        # YouTube 在低配机器上容易踩 bot check 或 JS 运行时问题，先走更稳的兜底。
+        if platform in {Platform.YOUTUBE, Platform.IWARA}:
             fallback_media = self._resolve_third_party_metadata(url)
             if fallback_media is not None:
                 return fallback_media
@@ -168,6 +188,26 @@ class DownloaderService:
             if fallback_media is not None:
                 return fallback_media
             raise
+
+    def _get_cached_metadata(self, url: str) -> ExtractedMedia | None:
+        now = datetime.now(timezone.utc)
+        with self._metadata_cache_lock:
+            cached = self._metadata_cache.get(url)
+            if cached is None:
+                return None
+            if cached.expires_at <= now:
+                self._metadata_cache.pop(url, None)
+                return None
+            return cached.media
+
+    def _store_cached_metadata(self, url: str, media: ExtractedMedia) -> None:
+        ttl_seconds = max(0, settings.metadata_cache_ttl_seconds)
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+        with self._metadata_cache_lock:
+            self._metadata_cache[url] = CachedExtractedMedia(
+                media=media,
+                expires_at=expires_at,
+            )
 
     def _download_sync(
         self,
@@ -415,6 +455,7 @@ class DownloaderService:
                     attempt.request_options.cookie_header,
                     str(attempt.request_options.cookies_file) if attempt.request_options.cookies_file else None,
                     attempt.request_options.user_agent,
+                    attempt.request_options.authorization_header,
                     attempt.extra_options,
                 )
             )
@@ -526,6 +567,9 @@ class DownloaderService:
 
         if download and settings.download_format:
             options["format"] = settings.download_format
+            if settings.download_concurrent_fragment_downloads > 1:
+                # 这里只影响真正进入下载路径的任务，不会影响纯解析或直链返回。
+                options["concurrent_fragment_downloads"] = settings.download_concurrent_fragment_downloads
 
         if request_options.proxy:
             options["proxy"] = request_options.proxy
@@ -535,6 +579,8 @@ class DownloaderService:
             http_headers["User-Agent"] = request_options.user_agent
         if request_options.cookie_header:
             http_headers["Cookie"] = request_options.cookie_header
+        if request_options.authorization_header:
+            http_headers["Authorization"] = request_options.authorization_header
         if http_headers:
             options["http_headers"] = http_headers
 
@@ -571,6 +617,8 @@ class DownloaderService:
                 media = third_party_fallback_service.resolve_twitter_media(url)
             elif platform == Platform.YOUTUBE:
                 media = third_party_fallback_service.resolve_youtube_media(url)
+            elif platform == Platform.IWARA:
+                media = third_party_fallback_service.resolve_iwara_media(url)
             else:
                 return None
         except ThirdPartyFallbackError as exc:
@@ -683,6 +731,8 @@ class DownloaderService:
         proxy = settings.proxy
         cookie_header = self._build_default_cookie_header()
         cookies_file = settings.cookies_file
+        user_agent = settings.user_agent
+        authorization_header = None
 
         if platform == Platform.BILIBILI:
             proxy = settings.bilibili_proxy or proxy
@@ -694,6 +744,11 @@ class DownloaderService:
         elif platform == Platform.TWITTER:
             cookie_header = self._build_twitter_cookie_header() or cookie_header
             cookies_file = settings.twitter_cookies_file or cookies_file
+        elif platform == Platform.IWARA:
+            # 这些头既供 yt-dlp 尝试 Iwara 提取器使用，也供官方 API 兜底共用。
+            cookie_header = self._normalize_cookie_header(settings.iwara_cookies) or cookie_header
+            user_agent = settings.iwara_user_agent or user_agent
+            authorization_header = self._normalize_authorization_header(settings.iwara_authorization)
 
         resolved_cookie_file = None if cookie_header else self._resolve_cookie_file(cookies_file, platform)
         return PlatformRequestOptions(
@@ -701,7 +756,8 @@ class DownloaderService:
             proxy=proxy,
             cookie_header=cookie_header,
             cookies_file=resolved_cookie_file,
-            user_agent=settings.user_agent,
+            user_agent=user_agent,
+            authorization_header=authorization_header,
         )
 
     def _build_default_cookie_header(self) -> str | None:
@@ -748,6 +804,16 @@ class DownloaderService:
             normalized = normalized.split(":", 1)[1].strip()
         return normalized or None
 
+    def _normalize_authorization_header(self, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if normalized.lower().startswith("bearer "):
+            return normalized
+        return f"Bearer {normalized}"
+
     def _resolve_cookie_file(self, configured_path: str | None, platform: Platform | None) -> Path | None:
         if not configured_path:
             return None
@@ -772,6 +838,8 @@ class DownloaderService:
             return Platform.YOUTUBE
         if "reddit.com" in host or "redd.it" in host:
             return Platform.REDDIT
+        if "iwara.tv" in host:
+            return Platform.IWARA
         return None
 
     def _build_guided_error_message(self, url: str, raw_message: str) -> str:
@@ -816,6 +884,12 @@ class DownloaderService:
                 or settings.cookies_file
             ):
                 hints.append("可配置 TWITTER_AUTH_TOKEN，必要时补充 TWITTER_CT0")
+
+        if platform == Platform.IWARA:
+            if "Failed to parse JSON" in message or "invalid JSON" in message or "Cloudflare" in message:
+                hints.append("可配置 IWARA_AUTHORIZATION=Bearer ...，必要时补充 IWARA_COOKIES 和 IWARA_USER_AGENT")
+            if "errors.privateVideo" in message:
+                hints.append("当前 Iwara 视频可能需要登录态，请检查 IWARA_AUTHORIZATION 是否有效")
 
         if not hints:
             return message

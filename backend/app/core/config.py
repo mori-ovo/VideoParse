@@ -19,8 +19,9 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://127.0.0.1:5173"
     api_public_origin: str = "http://127.0.0.1:8000"
 
-    cleanup_interval_hours: int = 6
-    cleanup_retention_hours: int = 6
+    # 临时文件、缓存文件和输出文件的清理周期与保留时间。
+    cleanup_interval_hours: int = 4
+    cleanup_retention_hours: int = 4
 
     proxy: str | None = Field(
         default=None,
@@ -106,9 +107,30 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("TWITTER_CT0"),
     )
 
+    iwara_authorization: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("IWARA_AUTHORIZATION", "IWARA_BEARER_TOKEN"),
+    )
+    iwara_cookies: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("IWARA_COOKIES"),
+    )
+    iwara_user_agent: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("IWARA_USER_AGENT"),
+    )
+
     download_format: str = Field(
         default="bestvideo*[height<=1080]+bestaudio/best[height<=1080]/best",
         validation_alias=AliasChoices("DOWNLOAD_FORMAT", "YT_DLP_DOWNLOAD_FORMAT"),
+    )
+    # yt-dlp 对支持分片的源站启用并发分片下载，用来改善长视频吞吐。
+    download_concurrent_fragment_downloads: int = Field(
+        default=4,
+        validation_alias=AliasChoices(
+            "DOWNLOAD_CONCURRENT_FRAGMENT_DOWNLOADS",
+            "YT_DLP_CONCURRENT_FRAGMENT_DOWNLOADS",
+        ),
     )
     merge_output_format: str = Field(
         default="mp4",
@@ -118,6 +140,12 @@ class Settings(BaseSettings):
     proxy_timeout_seconds: int = 30
     proxy_chunk_size: int = 65536
     proxy_max_connections: int = 20
+    # 元数据短缓存用于减少同一链接在解析、重定向、代理阶段的重复提取。
+    metadata_cache_ttl_seconds: int = 300
+    # 超过该时长且只有分离流时，auto 模式优先返回单链接合流代理。
+    lazy_stream_min_duration_seconds: int = 600
+    # 单链接合流代理允许 ffmpeg 预热的最长等待时间。
+    lazy_stream_startup_timeout_seconds: int = 20
 
     temp_dir: Path = Field(default_factory=lambda: PROJECT_ROOT / "temp")
     cache_dir: Path = Field(default_factory=lambda: PROJECT_ROOT / "cache")

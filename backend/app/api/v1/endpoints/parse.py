@@ -14,5 +14,5 @@ async def create_parse_task(payload: ParseRequest) -> ParseAcceptedResponse:
     asyncio.create_task(task_service.run_download_pipeline(task.task_id))
     return ParseAcceptedResponse(
         task=task,
-        note="当前默认使用自动模式：有单文件直链就直接返回，没有则自动下载并合流。",
+        note="当前默认使用自动模式：有单文件直链就直接返回；长分离流优先生成稳定单链接；其余情况再自动下载并合流。",
     )

@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.core.config import settings
+from app.services.storage_service import storage_service
 
 logger = logging.getLogger(__name__)
 
@@ -46,18 +47,26 @@ class CleanupService:
         deleted_files = 0
         deleted_dirs = 0
 
-        for directory in (settings.temp_dir, settings.cache_dir):
+        # 现在 output 也按同一策略清理，适合 VRC 场景的一次性使用模型。
+        for directory in (settings.temp_dir, settings.cache_dir, settings.output_dir):
             deleted_files += self._remove_expired_files(directory, threshold)
             deleted_dirs += self._remove_empty_dirs(directory)
+        # 文件删掉后要顺手清理索引，避免前端看到已经不存在的下载记录。
+        pruned_index_entries = await storage_service.prune_missing_files()
 
         logger.info(
-            "cleanup finished: deleted_files=%s deleted_dirs=%s interval_hours=%s retention_hours=%s",
+            "cleanup finished: deleted_files=%s deleted_dirs=%s pruned_index_entries=%s interval_hours=%s retention_hours=%s",
             deleted_files,
             deleted_dirs,
+            pruned_index_entries,
             settings.cleanup_interval_hours,
             settings.cleanup_retention_hours,
         )
-        return {"deleted_files": deleted_files, "deleted_dirs": deleted_dirs}
+        return {
+            "deleted_files": deleted_files,
+            "deleted_dirs": deleted_dirs,
+            "pruned_index_entries": pruned_index_entries,
+        }
 
     def _remove_expired_files(self, base_dir: Path, threshold: datetime) -> int:
         if not base_dir.exists():
@@ -72,8 +81,12 @@ class CleanupService:
             modified_at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
             if modified_at >= threshold:
                 continue
-            path.unlink(missing_ok=True)
-            deleted += 1
+            try:
+                # Windows 下文件可能还被占用，清理任务不该因为单个文件失败而中断。
+                path.unlink(missing_ok=True)
+                deleted += 1
+            except OSError:
+                continue
         return deleted
 
     def _remove_empty_dirs(self, base_dir: Path) -> int:

@@ -24,5 +24,6 @@ async def health_check() -> dict[str, object]:
             "twitter",
             "youtube",
             "reddit",
+            "iwara",
         ],
     }

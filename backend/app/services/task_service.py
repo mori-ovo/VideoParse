@@ -1,8 +1,12 @@
 import asyncio
 import json
 import logging
+import mimetypes
 import re
+import secrets
+import string
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -15,9 +19,11 @@ from app.services.downloader_service import (
     DownloadProgressEvent,
     DownloaderExecutionError,
     DownloaderUnavailableError,
+    ExtractedMedia,
     downloader_service,
 )
 from app.services.storage_service import storage_service
+from app.utils.path import build_public_file_name
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +33,13 @@ PLATFORM_PATTERNS: tuple[tuple[Platform, re.Pattern[str]], ...] = (
     (Platform.TWITTER, re.compile(r"(twitter\.com|x\.com)", re.IGNORECASE)),
     (Platform.YOUTUBE, re.compile(r"(youtube\.com|youtu\.be)", re.IGNORECASE)),
     (Platform.REDDIT, re.compile(r"(reddit\.com|redd\.it)", re.IGNORECASE)),
+    (Platform.IWARA, re.compile(r"(iwara\.tv)", re.IGNORECASE)),
 )
 
 TERMINAL_TASK_STATUSES = {TaskStatus.SUCCESS, TaskStatus.FAILED}
+FFMPEG_MISSING_MESSAGE = (
+    "当前资源需要音视频合流，但服务器未找到 ffmpeg。请先安装 ffmpeg 或配置 FFMPEG_LOCATION。"
+)
 
 
 class TaskService:
@@ -52,7 +62,7 @@ class TaskService:
                     update={
                         "status": TaskStatus.FAILED,
                         "progress": 100,
-                        "message": "服务重启，未完成任务已标记为失败，请重新提交解析。",
+                        "message": "服务已重启，未完成任务已标记为失败，请重新提交解析。",
                         "error_message": task.error_message or "后端已重启，原任务执行被中断。",
                         "updated_at": now,
                     }
@@ -90,7 +100,16 @@ class TaskService:
 
     async def get_task(self, task_id: str) -> TaskRecord | None:
         async with self._lock:
-            return self._tasks.get(task_id)
+            task = self._tasks.get(task_id)
+            if task is None:
+                return None
+
+            migrated_task = self._migrate_task_result_links(task)
+            if migrated_task is not task:
+                self._tasks[task_id] = migrated_task
+                self._persist_tasks()
+                return migrated_task
+            return task
 
     async def list_tasks(self, limit: int = 20) -> list[TaskRecord]:
         async with self._lock:
@@ -142,7 +161,11 @@ class TaskService:
                 and metadata.direct_url
                 and metadata.extractor in {"iiilab", "fxtwitter"}
             ):
-                result = self._build_direct_result(task_id=task_id, metadata=metadata)
+                result = self._build_direct_result(
+                    task_id=task_id,
+                    metadata=metadata,
+                    platform=task.platform,
+                )
                 await self._update_task(
                     task_id=task_id,
                     status_value=TaskStatus.SUCCESS,
@@ -153,7 +176,11 @@ class TaskService:
                 return
 
             if task.delivery_mode == DeliveryMode.DIRECT:
-                result = self._build_direct_result(task_id=task_id, metadata=metadata)
+                result = self._build_direct_result(
+                    task_id=task_id,
+                    metadata=metadata,
+                    platform=task.platform,
+                )
                 await self._update_task(
                     task_id=task_id,
                     status_value=TaskStatus.SUCCESS,
@@ -164,7 +191,11 @@ class TaskService:
                 return
 
             if task.delivery_mode == DeliveryMode.AUTO and metadata.direct_url:
-                result = self._build_direct_result(task_id=task_id, metadata=metadata)
+                result = self._build_direct_result(
+                    task_id=task_id,
+                    metadata=metadata,
+                    platform=task.platform,
+                )
                 await self._update_task(
                     task_id=task_id,
                     status_value=TaskStatus.SUCCESS,
@@ -175,10 +206,27 @@ class TaskService:
                 return
 
             availability = downloader_service.availability()
-            if metadata.requires_merge and not availability.ffmpeg_available:
-                raise DownloaderUnavailableError(
-                    "当前资源需要音视频合流，但服务器未找到 ffmpeg。请先安装 ffmpeg 或配置 FFMPEG_LOCATION。"
+            if task.delivery_mode == DeliveryMode.AUTO and self._should_use_lazy_stream(metadata):
+                if not availability.ffmpeg_available:
+                    raise DownloaderUnavailableError(FFMPEG_MISSING_MESSAGE)
+
+                # 长视频在 auto 模式下优先返回本站单链接，让前端尽快拿到可用地址。
+                result = self._build_lazy_stream_result(
+                    task_id=task_id,
+                    metadata=metadata,
+                    platform=task.platform,
                 )
+                await self._update_task(
+                    task_id=task_id,
+                    status_value=TaskStatus.SUCCESS,
+                    progress=100,
+                    message="长视频已生成稳定单链接，可直接复制或下载。",
+                    result=result,
+                )
+                return
+
+            if metadata.requires_merge and not availability.ffmpeg_available:
+                raise DownloaderUnavailableError(FFMPEG_MISSING_MESSAGE)
 
             loop = asyncio.get_running_loop()
 
@@ -281,11 +329,17 @@ class TaskService:
             if cached_url:
                 return cached_url
 
-        metadata = await downloader_service.extract_metadata(task.source_url)
+        metadata = await downloader_service.extract_metadata(
+            task.source_url,
+            force_refresh=force_refresh,
+        )
 
         if kind == "single":
             if metadata.direct_url:
                 return metadata.direct_url
+            if task.result is not None and task.result.proxy_url and task.result.video_url and task.result.audio_url:
+                # 对长分离流任务，single 实际指向本站的合流代理地址。
+                return task.result.proxy_url
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="当前源站没有单文件直链，请改用自动模式生成单文件视频地址。",
@@ -329,7 +383,115 @@ class TaskService:
             return "已生成可分享的视频直链。你现在可以复制直链，或直接下载视频。"
         return "当前只能拿到分离流地址。若需要单文件，请使用自动模式。"
 
-    def _build_direct_result(self, task_id: str, metadata: Any) -> TaskResult:
+    def _should_use_lazy_stream(self, metadata: ExtractedMedia) -> bool:
+        # 只有“没有单文件直链 + 有音视频分离流 + 时长超过阈值”才走懒合流。
+        if metadata.direct_url:
+            return False
+        if not (metadata.video_url and metadata.audio_url):
+            return False
+        if metadata.duration is None:
+            return False
+        return metadata.duration >= settings.lazy_stream_min_duration_seconds
+
+    def _generate_public_file_id(self) -> str:
+        alphabet = string.ascii_lowercase + string.digits
+        return "".join(secrets.choice(alphabet) for _ in range(12))
+
+    def _normalize_media_extension(self, extension: str | None, default: str = "mp4") -> str:
+        normalized = (extension or "").strip().lower().lstrip(".")
+        return normalized or default
+
+    def _build_result_file_name(self, title: str, extension: str | None) -> str:
+        normalized_extension = self._normalize_media_extension(extension)
+        raw_file_name = f"{title or 'video'}.{normalized_extension}"
+        return build_public_file_name(raw_file_name, fallback_stem="video")
+
+    def _build_public_file_links(self, file_id: str, file_name: str) -> tuple[str, str]:
+        play_url = storage_service.build_stream_url(file_id, file_name)
+        download_url = f"{settings.api_public_origin}{settings.api_v1_prefix}/files/{file_id}/download"
+        return play_url, download_url
+
+    def _build_task_proxy_file_result(
+        self,
+        *,
+        title: str,
+        extension: str | None,
+        created_at: datetime,
+        redirect_url: str,
+        proxy_url: str,
+        expires_note: str,
+        video_url: str | None = None,
+        video_redirect_url: str | None = None,
+        video_proxy_url: str | None = None,
+        audio_url: str | None = None,
+        audio_redirect_url: str | None = None,
+        audio_proxy_url: str | None = None,
+    ) -> TaskResult:
+        # 这类结果本质上仍然是任务代理流，但对外暴露成 /files/{12位}.mp4，
+        # 这样既保留之前的短链接格式，也不用等待整段视频先下载完成。
+        file_id = self._generate_public_file_id()
+        file_name = self._build_result_file_name(title=title, extension=extension)
+        play_url, download_url = self._build_public_file_links(file_id=file_id, file_name=file_name)
+        content_type = mimetypes.guess_type(file_name)[0] or "video/mp4"
+        return TaskResult(
+            result_type=ResultType.DIRECT,
+            file_id=file_id,
+            file_name=file_name,
+            content_type=content_type,
+            play_url=play_url,
+            download_url=download_url,
+            direct_url=play_url,
+            redirect_url=redirect_url,
+            proxy_url=proxy_url,
+            video_url=video_url,
+            video_redirect_url=video_redirect_url,
+            video_proxy_url=video_proxy_url,
+            audio_url=audio_url,
+            audio_redirect_url=audio_redirect_url,
+            audio_proxy_url=audio_proxy_url,
+            created_at=created_at,
+            expires_note=expires_note,
+        )
+
+    def _migrate_iwara_short_file_result(self, task: TaskRecord, result: TaskResult) -> TaskResult:
+        existing_extension = Path(result.file_name).suffix if result.file_name else ""
+        extension = existing_extension.lstrip(".") or settings.merge_output_format
+        file_id = result.file_id or self._generate_public_file_id()
+        file_name = result.file_name or self._build_result_file_name(task.title, extension)
+        play_url, download_url = self._build_public_file_links(file_id=file_id, file_name=file_name)
+        content_type = result.content_type or mimetypes.guess_type(file_name)[0] or "video/mp4"
+
+        updates: dict[str, str] = {}
+        if result.file_id != file_id:
+            updates["file_id"] = file_id
+        if result.file_name != file_name:
+            updates["file_name"] = file_name
+        if result.content_type != content_type:
+            updates["content_type"] = content_type
+        if result.play_url != play_url:
+            updates["play_url"] = play_url
+        if result.download_url != download_url:
+            updates["download_url"] = download_url
+        if result.direct_url != play_url:
+            updates["direct_url"] = play_url
+
+        if not updates:
+            return result
+        return result.model_copy(update=updates)
+
+    async def get_task_by_file_id(self, file_id: str) -> TaskRecord | None:
+        async with self._lock:
+            for task in self._tasks.values():
+                if task.result is not None and task.result.file_id == file_id:
+                    return task
+        return None
+
+    def _build_direct_result(
+        self,
+        task_id: str,
+        metadata: ExtractedMedia,
+        platform: Platform,
+    ) -> TaskResult:
         created_at = datetime.now(timezone.utc)
         redirect_base_url = f"{settings.api_public_origin}{settings.api_v1_prefix}/tasks/{task_id}/redirect"
         proxy_base_url = f"{settings.api_public_origin}{settings.api_v1_prefix}/tasks/{task_id}/proxy"
@@ -337,11 +499,25 @@ class TaskService:
         if metadata.direct_url:
             redirect_url = f"{redirect_base_url}?kind=single"
             proxy_url = f"{proxy_base_url}?kind=single"
+            play_url = redirect_url
+            download_url = redirect_url
+            direct_url = metadata.direct_url
+
+            if platform == Platform.IWARA:
+                return self._build_task_proxy_file_result(
+                    title=metadata.title,
+                    extension=metadata.direct_ext,
+                    created_at=created_at,
+                    redirect_url=redirect_url,
+                    proxy_url=proxy_url,
+                    expires_note="Iwara 使用本站生成的 12 位短链接，实际播放时由后端代理源站直链。",
+                )
+
             return TaskResult(
                 result_type=ResultType.DIRECT,
-                play_url=redirect_url,
-                download_url=redirect_url,
-                direct_url=metadata.direct_url,
+                play_url=play_url,
+                download_url=download_url,
+                direct_url=direct_url,
                 redirect_url=redirect_url,
                 proxy_url=proxy_url,
                 created_at=created_at,
@@ -363,6 +539,49 @@ class TaskService:
             )
 
         raise DownloaderExecutionError("未能通过 yt-dlp 提取到可用的媒体地址。")
+
+    def _build_lazy_stream_result(
+        self,
+        task_id: str,
+        metadata: ExtractedMedia,
+        platform: Platform,
+    ) -> TaskResult:
+        created_at = datetime.now(timezone.utc)
+        proxy_url = f"{settings.api_public_origin}{settings.api_v1_prefix}/tasks/{task_id}/proxy?kind=single"
+        redirect_base_url = f"{settings.api_public_origin}{settings.api_v1_prefix}/tasks/{task_id}/redirect"
+        proxy_base_url = f"{settings.api_public_origin}{settings.api_v1_prefix}/tasks/{task_id}/proxy"
+        if platform == Platform.IWARA:
+            return self._build_task_proxy_file_result(
+                title=metadata.title,
+                extension=settings.merge_output_format,
+                created_at=created_at,
+                redirect_url=proxy_url,
+                proxy_url=proxy_url,
+                expires_note="Iwara 长视频使用本站生成的 12 位短链接，播放时会按需合流。",
+                video_url=metadata.video_url,
+                video_redirect_url=f"{redirect_base_url}?kind=video" if metadata.video_url else None,
+                video_proxy_url=f"{proxy_base_url}?kind=video" if metadata.video_url else None,
+                audio_url=metadata.audio_url,
+                audio_redirect_url=f"{redirect_base_url}?kind=audio" if metadata.audio_url else None,
+                audio_proxy_url=f"{proxy_base_url}?kind=audio" if metadata.audio_url else None,
+            )
+        # 对前端仍然伪装成 direct 结果，这样现有按钮逻辑不用改。
+        return TaskResult(
+            result_type=ResultType.DIRECT,
+            play_url=proxy_url,
+            download_url=proxy_url,
+            direct_url=proxy_url,
+            redirect_url=proxy_url,
+            proxy_url=proxy_url,
+            video_url=metadata.video_url,
+            video_redirect_url=f"{redirect_base_url}?kind=video" if metadata.video_url else None,
+            video_proxy_url=f"{proxy_base_url}?kind=video" if metadata.video_url else None,
+            audio_url=metadata.audio_url,
+            audio_redirect_url=f"{redirect_base_url}?kind=audio" if metadata.audio_url else None,
+            audio_proxy_url=f"{proxy_base_url}?kind=audio" if metadata.audio_url else None,
+            created_at=created_at,
+            expires_note="长视频使用本站生成的单链接，播放时会按需合流。",
+        )
 
     async def _update_task(
         self,
@@ -414,6 +633,7 @@ class TaskService:
             return {}
 
         tasks: dict[str, TaskRecord] = {}
+        changed = False
         for item in raw_data:
             if not isinstance(item, dict):
                 continue
@@ -422,9 +642,29 @@ class TaskService:
             except Exception:  # noqa: BLE001
                 logger.exception("failed to parse task record from index")
                 continue
-            task = self._migrate_task_result_links(task)
-            tasks[task.task_id] = task
+            migrated_task = self._migrate_task_result_links(task)
+            if migrated_task is not task:
+                changed = True
+            tasks[migrated_task.task_id] = migrated_task
+
+        if changed:
+            self._persist_loaded_tasks(tasks)
         return tasks
+
+    def _persist_loaded_tasks(self, tasks: dict[str, TaskRecord]) -> None:
+        index_path = settings.task_index_path
+        try:
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = [
+                task.model_dump(mode="json")
+                for task in sorted(tasks.values(), key=lambda item: item.created_at, reverse=True)
+            ]
+            index_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            logger.exception("failed to persist migrated task index: %s", index_path)
 
     def _persist_tasks(self) -> None:
         index_path = settings.task_index_path
@@ -447,6 +687,12 @@ class TaskService:
             return task
 
         if result.result_type == ResultType.DIRECT:
+            if task.platform == Platform.IWARA and result.proxy_url:
+                migrated_result = self._migrate_iwara_short_file_result(task=task, result=result)
+                if migrated_result is not result:
+                    return task.model_copy(update={"result": migrated_result})
+                return task
+
             if not result.redirect_url:
                 return task
             if result.play_url == result.redirect_url and result.download_url == result.redirect_url:
@@ -477,7 +723,7 @@ class TaskService:
 
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="当前只支持 bilibili、douyin、twitter/x、youtube、reddit 链接。",
+            detail="当前只支持 bilibili、douyin、twitter/x、youtube、reddit、iwara 链接。",
         )
 
 
