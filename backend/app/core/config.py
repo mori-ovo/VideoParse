@@ -140,6 +140,10 @@ class Settings(BaseSettings):
         default=2,
         validation_alias=AliasChoices("TELEGRAM_POLL_INTERVAL_SECONDS", "TG_POLL_INTERVAL_SECONDS"),
     )
+    telegram_file_timeout_seconds: int = Field(
+        default=180,
+        validation_alias=AliasChoices("TELEGRAM_FILE_TIMEOUT_SECONDS", "TG_FILE_TIMEOUT_SECONDS"),
+    )
     telegram_allowed_chat_ids: str | None = Field(
         default=None,
         validation_alias=AliasChoices("TELEGRAM_ALLOWED_CHAT_IDS", "TG_ALLOWED_CHAT_IDS"),

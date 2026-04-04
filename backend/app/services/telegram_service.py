@@ -88,6 +88,7 @@ class TelegramService:
     def __init__(self) -> None:
         self._client: httpx.AsyncClient | None = None
         self._polling_task: asyncio.Task[None] | None = None
+        self._update_tasks: set[asyncio.Task[None]] = set()
         self._stop_event = asyncio.Event()
         self._lock = asyncio.Lock()
         self._files = self._load_index()
@@ -125,6 +126,10 @@ class TelegramService:
             self._stop_event.set()
             await self._polling_task
             self._polling_task = None
+
+        if self._update_tasks:
+            await asyncio.gather(*self._update_tasks, return_exceptions=True)
+            self._update_tasks.clear()
 
         if self._client is not None:
             await self._client.aclose()
@@ -328,10 +333,9 @@ class TelegramService:
                 if isinstance(update_id, int):
                     self._update_offset = max(self._update_offset, update_id + 1)
                     self._persist_state()
-                try:
-                    await self.handle_update(update)
-                except Exception:  # noqa: BLE001
-                    logger.exception("failed to handle telegram update: %s", update_id)
+                task = asyncio.create_task(self._handle_update_safe(update=update, update_id=update_id))
+                self._update_tasks.add(task)
+                task.add_done_callback(self._update_tasks.discard)
 
     async def _sleep_until_next_poll(self) -> None:
         try:
@@ -378,6 +382,32 @@ class TelegramService:
                 "Telegram Bot API is unreachable at %s; webhook reset skipped. Check TELEGRAM_BOT_API_BASE or start telegram-bot-api.",
                 settings.telegram_bot_api_base,
             )
+
+    async def _handle_update_safe(self, update: dict[str, Any], update_id: object) -> None:
+        try:
+            await self.handle_update(update)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("failed to handle telegram update: %s", update_id)
+            await self._notify_update_failure(update=update, exc=exc)
+
+    async def _notify_update_failure(self, update: dict[str, Any], exc: Exception) -> None:
+        message = self._extract_update_message(update)
+        if message is None:
+            return
+
+        chat_id = self._extract_chat_id(message)
+        if chat_id is None or not self._is_chat_allowed(chat_id):
+            return
+
+        error_text = "当前 Telegram 文件处理失败，请稍后重试。"
+        if self._is_timeout_error(exc):
+            error_text = "当前 Telegram 文件获取超时，请稍后重试，或先发送较小的视频测试。"
+
+        await self._safe_send_message(
+            chat_id=chat_id,
+            text=error_text,
+            reply_to_message_id=self._extract_message_id(message),
+        )
 
     async def _register_media(
         self,
@@ -476,6 +506,7 @@ class TelegramService:
         result = await self._call_api(
             method="getFile",
             payload={"file_id": telegram_file_id},
+            timeout_seconds=settings.telegram_file_timeout_seconds,
         )
         if not isinstance(result, dict):
             raise TelegramServiceError("Telegram getFile 返回格式不正确。")
@@ -485,14 +516,20 @@ class TelegramService:
             return file_path
         raise TelegramServiceError("Telegram getFile 没有返回 file_path。")
 
-    async def _call_api(self, method: str, payload: dict[str, Any]) -> Any:
+    async def _call_api(
+        self,
+        method: str,
+        payload: dict[str, Any],
+        timeout_seconds: float | None = None,
+    ) -> Any:
         client = self._require_client()
         url = self._build_api_url(method)
         try:
-            response = await client.post(url, json=payload)
+            response = await client.post(url, json=payload, timeout=timeout_seconds)
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise TelegramServiceError(f"Telegram API 请求失败：{exc}") from exc
+            error_detail = str(exc).strip() or exc.__class__.__name__
+            raise TelegramServiceError(f"Telegram API 请求失败：{error_detail}") from exc
 
         try:
             data = response.json()
@@ -528,6 +565,24 @@ class TelegramService:
                 self._poll_error_streak,
                 exc,
             )
+
+    def _is_timeout_error(self, exc: BaseException) -> bool:
+        current: BaseException | None = exc
+        visited: set[int] = set()
+        while current is not None:
+            object_id = id(current)
+            if object_id in visited:
+                break
+            visited.add(object_id)
+
+            if isinstance(current, (httpx.TimeoutException, TimeoutError)):
+                return True
+            if current.__class__.__name__ in {"ReadTimeout", "WriteTimeout", "PoolTimeout", "ConnectTimeout"}:
+                return True
+
+            next_error = current.__cause__ or current.__context__
+            current = next_error if isinstance(next_error, BaseException) else None
+        return False
 
     async def _safe_send_message(
         self,
