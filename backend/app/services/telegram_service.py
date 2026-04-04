@@ -89,6 +89,7 @@ class TelegramService:
         self._client: httpx.AsyncClient | None = None
         self._polling_task: asyncio.Task[None] | None = None
         self._update_tasks: set[asyncio.Task[None]] = set()
+        self._prefetch_tasks: set[asyncio.Task[None]] = set()
         self._stop_event = asyncio.Event()
         self._lock = asyncio.Lock()
         self._files = self._load_index()
@@ -130,6 +131,12 @@ class TelegramService:
         if self._update_tasks:
             await asyncio.gather(*self._update_tasks, return_exceptions=True)
             self._update_tasks.clear()
+
+        if self._prefetch_tasks:
+            for task in self._prefetch_tasks:
+                task.cancel()
+            await asyncio.gather(*self._prefetch_tasks, return_exceptions=True)
+            self._prefetch_tasks.clear()
 
         if self._client is not None:
             await self._client.aclose()
@@ -268,6 +275,7 @@ class TelegramService:
             chat_id=chat_id,
             message_id=message_id,
         )
+        self._schedule_file_path_prefetch(public_id=public_file.public_id)
         return storage_service.build_stream_url(public_file.public_id, public_file.file_name)
 
     async def handle_update(self, update: dict[str, Any]) -> None:
@@ -426,7 +434,6 @@ class TelegramService:
         chat_id: int,
         message_id: int,
     ) -> TelegramPublicFile:
-        file_path = await self._get_file_path(media.telegram_file_id)
         now = datetime.now(timezone.utc)
 
         async with self._lock:
@@ -442,7 +449,10 @@ class TelegramService:
                     public_id=public_id,
                     telegram_file_id=media.telegram_file_id,
                     telegram_file_unique_id=media.telegram_file_unique_id,
-                    file_path=file_path,
+                    # 这里先不阻塞等待 getFile。
+                    # 对大视频来说，本地 Bot API 可能要很久才能返回 file_path。
+                    # 先生成短链并回复给用户，再在后台预热 file_path，首次访问时也会兜底刷新。
+                    file_path=None,
                     file_name=media.file_name,
                     content_type=media.content_type,
                     file_size=media.file_size,
@@ -456,7 +466,7 @@ class TelegramService:
             else:
                 public_file.telegram_file_id = media.telegram_file_id
                 public_file.telegram_file_unique_id = media.telegram_file_unique_id
-                public_file.file_path = file_path
+                # 相同资源再次出现时保留已解析出的 file_path，避免重复触发 getFile。
                 public_file.file_name = media.file_name
                 public_file.content_type = media.content_type
                 public_file.file_size = media.file_size
@@ -468,6 +478,21 @@ class TelegramService:
             self._unique_index[media.telegram_file_unique_id] = public_id
             self._persist_index_unlocked()
             return public_file
+
+    def _schedule_file_path_prefetch(self, *, public_id: str) -> None:
+        task = asyncio.create_task(self._prefetch_file_path(public_id=public_id))
+        self._prefetch_tasks.add(task)
+        task.add_done_callback(self._prefetch_tasks.discard)
+
+    async def _prefetch_file_path(self, *, public_id: str) -> None:
+        public_file = await self.get_public_file(public_id)
+        if public_file is None or public_file.file_path:
+            return
+
+        try:
+            await self._refresh_file_path(public_file)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("telegram file prefetch failed: public_id=%s error=%s", public_id, exc)
 
     async def _resolve_target(
         self,
