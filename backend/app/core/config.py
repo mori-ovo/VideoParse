@@ -120,6 +120,31 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("IWARA_USER_AGENT"),
     )
 
+    telegram_bot_token: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TELEGRAM_BOT_TOKEN", "TG_BOT_TOKEN"),
+    )
+    telegram_bot_api_base: str = Field(
+        default="http://127.0.0.1:8081",
+        validation_alias=AliasChoices("TELEGRAM_BOT_API_BASE", "TG_BOT_API_BASE"),
+    )
+    telegram_polling_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("TELEGRAM_POLLING_ENABLED", "TG_POLLING_ENABLED"),
+    )
+    telegram_poll_timeout_seconds: int = Field(
+        default=20,
+        validation_alias=AliasChoices("TELEGRAM_POLL_TIMEOUT_SECONDS", "TG_POLL_TIMEOUT_SECONDS"),
+    )
+    telegram_poll_interval_seconds: int = Field(
+        default=2,
+        validation_alias=AliasChoices("TELEGRAM_POLL_INTERVAL_SECONDS", "TG_POLL_INTERVAL_SECONDS"),
+    )
+    telegram_allowed_chat_ids: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TELEGRAM_ALLOWED_CHAT_IDS", "TG_ALLOWED_CHAT_IDS"),
+    )
+
     download_format: str = Field(
         default="bestvideo*[height<=1080]+bestaudio/best[height<=1080]/best",
         validation_alias=AliasChoices("DOWNLOAD_FORMAT", "YT_DLP_DOWNLOAD_FORMAT"),
@@ -156,6 +181,12 @@ class Settings(BaseSettings):
     task_index_path: Path = Field(
         default_factory=lambda: PROJECT_ROOT / "output" / ".task-index.json"
     )
+    telegram_file_index_path: Path = Field(
+        default_factory=lambda: PROJECT_ROOT / "output" / ".telegram-file-index.json"
+    )
+    telegram_state_path: Path = Field(
+        default_factory=lambda: PROJECT_ROOT / "output" / ".telegram-bot-state.json"
+    )
 
     @field_validator("debug", mode="before")
     @classmethod
@@ -168,9 +199,36 @@ class Settings(BaseSettings):
                 return True
         return value
 
+    @field_validator("telegram_bot_api_base", mode="before")
+    @classmethod
+    def normalize_telegram_bot_api_base(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().rstrip("/")
+        return value
+
     @property
     def cleanup_interval_seconds(self) -> int:
         return self.cleanup_interval_hours * 60 * 60
+
+    @property
+    def telegram_allowed_chat_id_set(self) -> set[int]:
+        if not isinstance(self.telegram_allowed_chat_ids, str) or not self.telegram_allowed_chat_ids.strip():
+            return set()
+
+        chat_ids: set[int] = set()
+        for raw_value in self.telegram_allowed_chat_ids.split(","):
+            normalized = raw_value.strip()
+            if not normalized:
+                continue
+            try:
+                chat_ids.add(int(normalized))
+            except ValueError:
+                continue
+        return chat_ids
+
+    @property
+    def telegram_bot_configured(self) -> bool:
+        return isinstance(self.telegram_bot_token, str) and bool(self.telegram_bot_token.strip())
 
     @property
     def runtime_directories(self) -> tuple[Path, Path, Path]:

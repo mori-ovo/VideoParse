@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.core.config import settings
 from app.services.downloader_service import downloader_service
+from app.services.telegram_service import telegram_service
 
 router = APIRouter(prefix="/health", tags=["health"])
 
@@ -25,5 +26,7 @@ async def health_check() -> dict[str, object]:
             "youtube",
             "reddit",
             "iwara",
+            "telegram-bot",
         ],
+        "telegram": telegram_service.status(),
     }

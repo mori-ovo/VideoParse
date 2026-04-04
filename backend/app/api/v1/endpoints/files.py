@@ -6,6 +6,7 @@ from fastapi.responses import FileResponse, Response
 from app.services.proxy_service import proxy_service
 from app.services.storage_service import storage_service
 from app.services.task_service import task_service
+from app.services.telegram_service import telegram_service
 
 router = APIRouter(prefix="/files", tags=["files"])
 
@@ -33,6 +34,27 @@ async def _build_task_proxy_file_response(
     return response
 
 
+async def _build_virtual_file_response(
+    request: Request,
+    file_id: str,
+    *,
+    as_attachment: bool,
+) -> Response | None:
+    task_response = await _build_task_proxy_file_response(
+        request=request,
+        file_id=file_id,
+        as_attachment=as_attachment,
+    )
+    if task_response is not None:
+        return task_response
+
+    return await telegram_service.build_public_file_response(
+        file_id=file_id,
+        request=request,
+        as_attachment=as_attachment,
+    )
+
+
 @router.get("/{file_id}/download", summary="下载任务产物")
 async def download_file(request: Request, file_id: str) -> Response:
     stored_file = await storage_service.get_file(file_id)
@@ -44,13 +66,13 @@ async def download_file(request: Request, file_id: str) -> Response:
             content_disposition_type="attachment",
         )
 
-    proxy_response = await _build_task_proxy_file_response(
+    virtual_response = await _build_virtual_file_response(
         request=request,
         file_id=file_id,
         as_attachment=True,
     )
-    if proxy_response is not None:
-        return proxy_response
+    if virtual_response is not None:
+        return virtual_response
 
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
@@ -68,13 +90,13 @@ async def stream_file_short(request: Request, file_id: str, extension: str) -> R
             content_disposition_type="inline",
         )
 
-    proxy_response = await _build_task_proxy_file_response(
+    virtual_response = await _build_virtual_file_response(
         request=request,
         file_id=file_id,
         as_attachment=False,
     )
-    if proxy_response is not None:
-        return proxy_response
+    if virtual_response is not None:
+        return virtual_response
 
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
@@ -92,13 +114,13 @@ async def open_file(request: Request, file_id: str) -> Response:
             content_disposition_type="inline",
         )
 
-    proxy_response = await _build_task_proxy_file_response(
+    virtual_response = await _build_virtual_file_response(
         request=request,
         file_id=file_id,
         as_attachment=False,
     )
-    if proxy_response is not None:
-        return proxy_response
+    if virtual_response is not None:
+        return virtual_response
 
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
@@ -116,13 +138,13 @@ async def stream_file(request: Request, file_id: str, file_name: str) -> Respons
             content_disposition_type="inline",
         )
 
-    proxy_response = await _build_task_proxy_file_response(
+    virtual_response = await _build_virtual_file_response(
         request=request,
         file_id=file_id,
         as_attachment=False,
     )
-    if proxy_response is not None:
-        return proxy_response
+    if virtual_response is not None:
+        return virtual_response
 
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.services.storage_service import storage_service
+from app.services.telegram_service import telegram_service
 
 logger = logging.getLogger(__name__)
 
@@ -41,24 +42,25 @@ class CleanupService:
                 continue
 
     async def run_cleanup_cycle(self) -> dict[str, int]:
-        threshold = datetime.now(timezone.utc) - timedelta(
-            hours=settings.cleanup_retention_hours
-        )
+        threshold = datetime.now(timezone.utc) - timedelta(hours=settings.cleanup_retention_hours)
         deleted_files = 0
         deleted_dirs = 0
 
-        # 现在 output 也按同一策略清理，适合 VRC 场景的一次性使用模型。
+        # temp、cache、output 三个目录统一按最近修改时间清理。
         for directory in (settings.temp_dir, settings.cache_dir, settings.output_dir):
             deleted_files += self._remove_expired_files(directory, threshold)
             deleted_dirs += self._remove_empty_dirs(directory)
-        # 文件删掉后要顺手清理索引，避免前端看到已经不存在的下载记录。
+
+        # 本地文件和 Telegram 短链索引都要同步修正，避免保留失效记录。
         pruned_index_entries = await storage_service.prune_missing_files()
+        pruned_telegram_entries = await telegram_service.prune_expired_entries(threshold)
 
         logger.info(
-            "cleanup finished: deleted_files=%s deleted_dirs=%s pruned_index_entries=%s interval_hours=%s retention_hours=%s",
+            "cleanup finished: deleted_files=%s deleted_dirs=%s pruned_index_entries=%s pruned_telegram_entries=%s interval_hours=%s retention_hours=%s",
             deleted_files,
             deleted_dirs,
             pruned_index_entries,
+            pruned_telegram_entries,
             settings.cleanup_interval_hours,
             settings.cleanup_retention_hours,
         )
@@ -66,6 +68,7 @@ class CleanupService:
             "deleted_files": deleted_files,
             "deleted_dirs": deleted_dirs,
             "pruned_index_entries": pruned_index_entries,
+            "pruned_telegram_entries": pruned_telegram_entries,
         }
 
     def _remove_expired_files(self, base_dir: Path, threshold: datetime) -> int:
@@ -82,7 +85,7 @@ class CleanupService:
             if modified_at >= threshold:
                 continue
             try:
-                # Windows 下文件可能还被占用，清理任务不该因为单个文件失败而中断。
+                # Windows 下文件可能还被占用，清理任务不应该因为单个文件失败而中断。
                 path.unlink(missing_ok=True)
                 deleted += 1
             except OSError:
