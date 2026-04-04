@@ -86,7 +86,10 @@ class TelegramResolvedTarget:
 
 class TelegramService:
     def __init__(self) -> None:
-        self._client: httpx.AsyncClient | None = None
+        self._poll_client: httpx.AsyncClient | None = None
+        self._command_client: httpx.AsyncClient | None = None
+        self._file_client: httpx.AsyncClient | None = None
+        self._stream_client: httpx.AsyncClient | None = None
         self._polling_task: asyncio.Task[None] | None = None
         self._update_tasks: set[asyncio.Task[None]] = set()
         self._prefetch_tasks: set[asyncio.Task[None]] = set()
@@ -99,18 +102,16 @@ class TelegramService:
         self._poll_error_streak = 0
 
     async def start(self) -> None:
-        if self._client is None:
-            timeout = httpx.Timeout(
-                connect=settings.proxy_timeout_seconds,
-                read=max(settings.proxy_timeout_seconds, settings.telegram_poll_timeout_seconds + 5),
-                write=settings.proxy_timeout_seconds,
-                pool=settings.proxy_timeout_seconds,
+        if self._poll_client is None:
+            self._poll_client = self._build_http_client(
+                read_timeout=max(settings.proxy_timeout_seconds, settings.telegram_poll_timeout_seconds + 5),
             )
-            limits = httpx.Limits(
-                max_connections=max(5, settings.proxy_max_connections),
-                max_keepalive_connections=max(5, settings.proxy_max_connections // 2),
-            )
-            self._client = httpx.AsyncClient(timeout=timeout, limits=limits)
+        if self._command_client is None:
+            self._command_client = self._build_http_client(read_timeout=settings.proxy_timeout_seconds)
+        if self._file_client is None:
+            self._file_client = self._build_http_client(read_timeout=settings.proxy_timeout_seconds)
+        if self._stream_client is None:
+            self._stream_client = self._build_http_client(read_timeout=settings.proxy_timeout_seconds)
 
         if not settings.telegram_bot_configured or not settings.telegram_polling_enabled:
             return
@@ -139,9 +140,18 @@ class TelegramService:
             await asyncio.gather(*self._prefetch_tasks, return_exceptions=True)
             self._prefetch_tasks.clear()
 
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        if self._poll_client is not None:
+            await self._poll_client.aclose()
+            self._poll_client = None
+        if self._command_client is not None:
+            await self._command_client.aclose()
+            self._command_client = None
+        if self._file_client is not None:
+            await self._file_client.aclose()
+            self._file_client = None
+        if self._stream_client is not None:
+            await self._stream_client.aclose()
+            self._stream_client = None
 
     def status(self) -> dict[str, object]:
         return {
@@ -181,7 +191,7 @@ class TelegramService:
                 detail="Telegram 文件路径不可用，无法生成视频直链。",
             )
 
-        client = self._require_client()
+        client = self._require_stream_client()
         upstream_response = await self._open_remote_stream(
             client=client,
             remote_url=resolved.remote_url,
@@ -385,6 +395,7 @@ class TelegramService:
                     "edited_channel_post",
                 ],
             },
+            client_kind="poll",
         )
         if not isinstance(result, list):
             raise TelegramServiceError("Telegram getUpdates 返回格式不正确。")
@@ -400,6 +411,7 @@ class TelegramService:
             await self._call_api(
                 method="deleteWebhook",
                 payload={"drop_pending_updates": False},
+                client_kind="command",
             )
             self._clear_error()
         except Exception as exc:  # noqa: BLE001
@@ -581,6 +593,7 @@ class TelegramService:
             method="getFile",
             payload={"file_id": telegram_file_id},
             timeout_seconds=settings.telegram_file_timeout_seconds,
+            client_kind="file",
         )
         if not isinstance(result, dict):
             raise TelegramServiceError("Telegram getFile 返回格式不正确。")
@@ -595,8 +608,9 @@ class TelegramService:
         method: str,
         payload: dict[str, Any],
         timeout_seconds: float | None = None,
+        client_kind: str = "command",
     ) -> Any:
-        client = self._require_client()
+        client = self._get_api_client(client_kind)
         url = self._build_api_url(method)
         try:
             response = await client.post(url, json=payload, timeout=timeout_seconds)
@@ -698,7 +712,7 @@ class TelegramService:
             payload["allow_sending_without_reply"] = True
 
         try:
-            await self._call_api(method="sendMessage", payload=payload)
+            await self._call_api(method="sendMessage", payload=payload, client_kind="command")
         except Exception:  # noqa: BLE001
             logger.exception("failed to send telegram message to chat_id=%s", chat_id)
 
@@ -865,14 +879,52 @@ class TelegramService:
         normalized_path = quote(file_path.lstrip("/"), safe="/")
         return f"{settings.telegram_bot_api_base}/file/bot{token}/{normalized_path}"
 
+    def _build_http_client(self, *, read_timeout: float) -> httpx.AsyncClient:
+        timeout = httpx.Timeout(
+            connect=settings.proxy_timeout_seconds,
+            read=read_timeout,
+            write=settings.proxy_timeout_seconds,
+            pool=settings.proxy_timeout_seconds,
+        )
+        limits = httpx.Limits(
+            max_connections=max(5, settings.proxy_max_connections),
+            max_keepalive_connections=max(5, settings.proxy_max_connections // 2),
+        )
+        return httpx.AsyncClient(timeout=timeout, limits=limits)
+
     def _generate_public_id(self) -> str:
         alphabet = string.ascii_lowercase + string.digits
         return "".join(secrets.choice(alphabet) for _ in range(12))
 
+    def _get_api_client(self, client_kind: str) -> httpx.AsyncClient:
+        if client_kind == "poll":
+            return self._require_poll_client()
+        if client_kind == "file":
+            return self._require_file_client()
+        return self._require_command_client()
+
+    def _require_poll_client(self) -> httpx.AsyncClient:
+        if self._poll_client is None:
+            raise TelegramServiceError("Telegram polling HTTP client is not started.")
+        return self._poll_client
+
+    def _require_command_client(self) -> httpx.AsyncClient:
+        if self._command_client is None:
+            raise TelegramServiceError("Telegram command HTTP client is not started.")
+        return self._command_client
+
+    def _require_file_client(self) -> httpx.AsyncClient:
+        if self._file_client is None:
+            raise TelegramServiceError("Telegram file HTTP client is not started.")
+        return self._file_client
+
+    def _require_stream_client(self) -> httpx.AsyncClient:
+        if self._stream_client is None:
+            raise TelegramServiceError("Telegram stream HTTP client is not started.")
+        return self._stream_client
+
     def _require_client(self) -> httpx.AsyncClient:
-        if self._client is None:
-            raise TelegramServiceError("Telegram HTTP 客户端尚未启动。")
-        return self._client
+        return self._require_command_client()
 
     def _load_index(self) -> dict[str, TelegramPublicFile]:
         index_path = settings.telegram_file_index_path
