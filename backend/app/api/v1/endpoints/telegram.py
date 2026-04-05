@@ -8,6 +8,16 @@ from app.services.telegram_service import TelegramServiceError, telegram_service
 router = APIRouter(prefix="/telegram", tags=["telegram"])
 
 
+@router.get("/status", summary="查看 Telegram 服务状态")
+async def get_telegram_status() -> dict[str, object]:
+    return telegram_service.status()
+
+
+@router.get("/eta-stats", summary="查看 Telegram ETA 学习统计")
+async def get_telegram_eta_stats() -> dict[str, object]:
+    return telegram_service.eta_diagnostics()
+
+
 @router.post("/webhook", summary="接收 Telegram webhook 更新")
 async def receive_telegram_webhook(
     payload: dict[str, Any],

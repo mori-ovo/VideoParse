@@ -255,6 +255,12 @@ class TelegramService:
             "registered_files": len(self._files),
             "bot_api_base": settings.telegram_bot_api_base,
             "last_error": self._last_error,
+            "file_info_eta": self._build_file_info_eta_summary(),
+        }
+
+    def eta_diagnostics(self) -> dict[str, object]:
+        return {
+            "file_info_eta": self._build_file_info_eta_diagnostics(),
         }
 
     async def build_public_file_response(
@@ -546,6 +552,62 @@ class TelegramService:
         if from_estimate:
             return f"预计剩余：约 {eta_text}"
         return f"预计剩余：{eta_text} 内（按超时上限）"
+
+    def _build_file_info_eta_summary(self) -> dict[str, object]:
+        overall = self._file_info_eta_state.overall
+        return {
+            "sample_count": overall.sample_count,
+            "avg_elapsed_seconds": round(overall.avg_elapsed_seconds, 2) if overall.sample_count > 0 else None,
+            "seconds_per_mb": round(self._file_info_eta_state.seconds_per_mb, 4),
+            "size_bucket_count": len(self._file_info_eta_state.size_buckets),
+            "duration_bucket_count": len(self._file_info_eta_state.duration_buckets),
+        }
+
+    def _build_file_info_eta_diagnostics(self) -> dict[str, object]:
+        overall = self._file_info_eta_state.overall
+        return {
+            "overall": self._serialize_timing_average(self._file_info_eta_state.overall),
+            "seconds_per_mb": round(self._file_info_eta_state.seconds_per_mb, 6),
+            "size_buckets": [
+                {
+                    "bucket": bucket,
+                    **self._serialize_timing_average(stats),
+                }
+                for bucket, stats in self._iter_sorted_timing_buckets(self._file_info_eta_state.size_buckets)
+            ],
+            "duration_buckets": [
+                {
+                    "bucket": bucket,
+                    **self._serialize_timing_average(stats),
+                }
+                for bucket, stats in self._iter_sorted_timing_buckets(self._file_info_eta_state.duration_buckets)
+            ],
+            "enough_samples": overall.sample_count >= 8,
+            "recommendation": self._build_file_info_eta_recommendation(overall.sample_count),
+        }
+
+    def _build_file_info_eta_recommendation(self, sample_count: int) -> str:
+        if sample_count >= 20:
+            return "样本量已具备参考价值，倒计时会主要依赖历史平均。"
+        if sample_count >= 8:
+            return "样本量开始够用，但不同体量视频仍可能有明显偏差。"
+        return "样本量偏少，当前倒计时仍会明显受初始估算影响。"
+
+    def _iter_sorted_timing_buckets(
+        self,
+        buckets: dict[str, TelegramTimingAverage],
+    ) -> list[tuple[str, TelegramTimingAverage]]:
+        return sorted(
+            buckets.items(),
+            key=lambda item: self._timing_bucket_sort_key(item[0]),
+        )
+
+    def _timing_bucket_sort_key(self, label: str) -> tuple[int, int, str]:
+        match = re.search(r"_(\d+)(mb|s)$", label)
+        if match is None:
+            return (2, 0, label)
+        unit_rank = 0 if match.group(2) == "mb" else 1
+        return (unit_rank, int(match.group(1)), label)
 
     def _estimate_file_info_remaining_seconds(
         self,
