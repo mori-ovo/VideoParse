@@ -108,6 +108,19 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("TWITTER_CT0"),
     )
 
+    douyin_cookies: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("DOUYIN_COOKIES"),
+    )
+    douyin_cookies_file: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("DOUYIN_COOKIES_FILE"),
+    )
+    douyin_user_agent: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("DOUYIN_USER_AGENT"),
+    )
+
     iwara_authorization: str | None = Field(
         default=None,
         validation_alias=AliasChoices("IWARA_AUTHORIZATION", "IWARA_BEARER_TOKEN"),

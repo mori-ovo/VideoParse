@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import logging
 import mimetypes
+import re
 import shutil
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -9,6 +10,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
 from urllib.parse import urlparse
+from urllib.parse import urlunparse
 
 from app.core.config import settings
 from app.schemas.task import Platform
@@ -18,6 +20,12 @@ from app.services.third_party_fallback_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+DOUYIN_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/135.0.0.0 Safari/537.36"
+)
 
 
 class DownloaderUnavailableError(RuntimeError):
@@ -133,6 +141,7 @@ class DownloaderService:
         )
 
     async def extract_metadata(self, url: str, force_refresh: bool = False) -> ExtractedMedia:
+        url = self._normalize_source_url(url)
         if not force_refresh:
             cached = self._get_cached_metadata(url)
             if cached is not None:
@@ -143,6 +152,7 @@ class DownloaderService:
         return extracted
 
     async def resolve_media_target(self, url: str, kind: str, force_refresh: bool = False) -> MediaTarget:
+        url = self._normalize_source_url(url)
         metadata = await self.extract_metadata(url, force_refresh=force_refresh)
         if kind == "single" and metadata.direct_url:
             return MediaTarget(url=metadata.direct_url, headers=metadata.direct_headers)
@@ -159,6 +169,7 @@ class DownloaderService:
         url: str,
         progress_callback: Callable[[DownloadProgressEvent], None] | None = None,
     ) -> DownloadedMedia:
+        url = self._normalize_source_url(url)
         return await asyncio.to_thread(
             self._download_sync,
             task_id,
@@ -167,6 +178,7 @@ class DownloaderService:
         )
 
     def _extract_metadata_sync(self, url: str) -> ExtractedMedia:
+        url = self._normalize_source_url(url)
         platform = self._detect_platform(url)
 
         # YouTube 在低配机器上容易踩 bot check 或 JS 运行时问题，先走更稳的兜底。
@@ -215,6 +227,7 @@ class DownloaderService:
         url: str,
         progress_callback: Callable[[DownloadProgressEvent], None] | None,
     ) -> DownloadedMedia:
+        url = self._normalize_source_url(url)
         task_output_dir = settings.output_dir / task_id
         task_temp_dir = settings.temp_dir / task_id
         task_output_dir.mkdir(parents=True, exist_ok=True)
@@ -252,6 +265,7 @@ class DownloaderService:
         download: bool,
         progress_callback: Callable[[DownloadProgressEvent], None] | None,
     ) -> dict[str, Any]:
+        url = self._normalize_source_url(url)
         yt_dlp = self._load_yt_dlp_module()
         logger = YtDlpLogger()
         request_options = self._resolve_platform_request_options(url)
@@ -611,6 +625,7 @@ class DownloaderService:
         return options
 
     def _resolve_third_party_metadata(self, url: str) -> ExtractedMedia | None:
+        url = self._normalize_source_url(url)
         platform = self._detect_platform(url)
         try:
             if platform == Platform.TWITTER:
@@ -624,7 +639,10 @@ class DownloaderService:
             else:
                 return None
         except ThirdPartyFallbackError as exc:
-            logger.warning("%s third-party fallback failed: %s", platform.value if platform else "unknown", exc)
+            if platform == Platform.DOUYIN:
+                logger.info("%s third-party fallback failed: %s", platform.value if platform else "unknown", exc)
+            else:
+                logger.warning("%s third-party fallback failed: %s", platform.value if platform else "unknown", exc)
             return None
 
         if media is None:
@@ -729,6 +747,7 @@ class DownloaderService:
         return [item.strip() for item in value.split(",") if item.strip()]
 
     def _resolve_platform_request_options(self, url: str) -> PlatformRequestOptions:
+        url = self._normalize_source_url(url)
         platform = self._detect_platform(url)
         proxy = settings.proxy
         cookie_header = self._build_default_cookie_header()
@@ -746,6 +765,11 @@ class DownloaderService:
         elif platform == Platform.TWITTER:
             cookie_header = self._build_twitter_cookie_header() or cookie_header
             cookies_file = settings.twitter_cookies_file or cookies_file
+        elif platform == Platform.DOUYIN:
+            # 抖音当前对匿名 Web 访问限制更严，优先使用平台专用 Cookie 和浏览器 UA。
+            cookie_header = self._build_douyin_cookie_header() or cookie_header
+            cookies_file = settings.douyin_cookies_file or cookies_file
+            user_agent = settings.douyin_user_agent or user_agent or DOUYIN_BROWSER_USER_AGENT
         elif platform == Platform.IWARA:
             # 这些头既供 yt-dlp 尝试 Iwara 提取器使用，也供官方 API 兜底共用。
             cookie_header = self._normalize_cookie_header(settings.iwara_cookies) or cookie_header
@@ -788,6 +812,9 @@ class DownloaderService:
             }
         )
 
+    def _build_douyin_cookie_header(self) -> str | None:
+        return self._normalize_cookie_header(settings.douyin_cookies)
+
     def _join_cookie_pairs(self, cookie_map: dict[str, str | None]) -> str | None:
         pairs = [
             f"{key}={value.strip()}"
@@ -829,6 +856,7 @@ class DownloaderService:
         return cookie_path
 
     def _detect_platform(self, url: str) -> Platform | None:
+        url = self._normalize_source_url(url)
         host = urlparse(url).netloc.lower()
         if "bilibili.com" in host or "b23.tv" in host:
             return Platform.BILIBILI
@@ -845,6 +873,7 @@ class DownloaderService:
         return None
 
     def _build_guided_error_message(self, url: str, raw_message: str) -> str:
+        url = self._normalize_source_url(url)
         message = raw_message.strip()
         platform = self._detect_platform(url)
         hints: list[str] = []
@@ -887,6 +916,22 @@ class DownloaderService:
             ):
                 hints.append("可配置 TWITTER_AUTH_TOKEN，必要时补充 TWITTER_CT0")
 
+        if platform == Platform.DOUYIN:
+            if "Fresh cookies" in message or "Failed to download web detail JSON" in message:
+                if not self._has_douyin_cookies_configured():
+                    hints.append(
+                        "请在 backend/.env 配置 DOUYIN_COOKIES 或 DOUYIN_COOKIES_FILE，建议直接使用浏览器最新导出的 Douyin Cookie"
+                    )
+                else:
+                    hints.append(
+                        "当前已配置 Douyin Cookie，但可能已经失效；请重新导出最新 Cookie，至少确保包含 s_v_web_id、ttwid、msToken 等字段"
+                    )
+                hints.append("第三方 Douyin 兜底接口当前不稳定，建议优先依赖浏览器 Cookie 方案")
+            elif "Unsupported URL" in message and "/note/" in url:
+                hints.append("当前链接是 note 形式，后端会自动转换为 /video/{id} 后再解析")
+            elif "没有拿到可用的视频或音频地址" in message:
+                hints.append("这通常仍是 Douyin Web 侧校验导致的空结果，优先检查 DOUYIN_COOKIES 是否足够新")
+
         if platform == Platform.IWARA:
             if "Failed to parse JSON" in message or "invalid JSON" in message or "Cloudflare" in message:
                 hints.append("可配置 IWARA_AUTHORIZATION=Bearer ...，必要时补充 IWARA_COOKIES 和 IWARA_USER_AGENT")
@@ -896,6 +941,52 @@ class DownloaderService:
         if not hints:
             return message
         return f"{message} 建议：{'；'.join(hints)}"
+
+    def _has_douyin_cookies_configured(self) -> bool:
+        return any(
+            [
+                settings.douyin_cookies,
+                settings.douyin_cookies_file,
+                settings.cookies,
+                settings.cookies_file,
+            ]
+        )
+
+    def _normalize_source_url(self, source_url: str) -> str:
+        parsed = urlparse(source_url)
+        host = parsed.netloc.lower()
+        path = parsed.path.rstrip("/")
+
+        # 下载器内部也做一次抖音归一化，避免外部直接调用时漏掉 note -> video 转换。
+        if host in {"www.douyin.com", "douyin.com"}:
+            note_match = re.fullmatch(r"/note/(?P<item_id>\d+)", path)
+            if note_match is not None:
+                return urlunparse(
+                    (
+                        parsed.scheme or "https",
+                        "www.douyin.com",
+                        f"/video/{note_match.group('item_id')}",
+                        "",
+                        "",
+                        "",
+                    )
+                )
+
+        if host in {"iesdouyin.com", "www.iesdouyin.com"}:
+            share_match = re.fullmatch(r"/share/(?P<kind>note|video)/(?P<item_id>\d+)", path)
+            if share_match is not None:
+                return urlunparse(
+                    (
+                        parsed.scheme or "https",
+                        "www.douyin.com",
+                        f"/video/{share_match.group('item_id')}",
+                        "",
+                        "",
+                        "",
+                    )
+                )
+
+        return source_url
 
     def _build_progress_hook(
         self,
