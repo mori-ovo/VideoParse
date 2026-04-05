@@ -6,7 +6,7 @@ import re
 import secrets
 import string
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
@@ -81,6 +81,7 @@ class TelegramIncomingMedia:
     file_name: str
     content_type: str
     file_size: int | None
+    duration_seconds: int | None
 
 
 @dataclass
@@ -93,6 +94,7 @@ class TelegramPublicFile:
     file_name: str
     content_type: str
     file_size: int | None
+    duration_seconds: int | None
     source_chat_id: int
     source_message_id: int
     created_at: datetime
@@ -119,6 +121,20 @@ class TelegramProgressMessage:
     download_started_at: float | None = None
 
 
+@dataclass
+class TelegramTimingAverage:
+    sample_count: int = 0
+    avg_elapsed_seconds: float = 0.0
+
+
+@dataclass
+class TelegramFileInfoEtaState:
+    seconds_per_mb: float = 1.0 / TELEGRAM_FILE_INFO_DEFAULT_MB_PER_SECOND
+    overall: TelegramTimingAverage = field(default_factory=TelegramTimingAverage)
+    size_buckets: dict[str, TelegramTimingAverage] = field(default_factory=dict)
+    duration_buckets: dict[str, TelegramTimingAverage] = field(default_factory=dict)
+
+
 class TelegramService:
     def __init__(self) -> None:
         self._poll_client: httpx.AsyncClient | None = None
@@ -134,14 +150,15 @@ class TelegramService:
         self._files = self._load_index()
         self._access_refresh_after: dict[str, float] = {}
         self._unique_index = self._build_unique_index(self._files)
-        self._update_offset = self._load_state()
+        loaded_state = self._load_state()
+        self._update_offset = loaded_state["update_offset"]
+        self._file_info_eta_state = loaded_state["file_info_eta_state"]
         self._last_error: str | None = None
         self._poll_error_streak = 0
         self._index_dirty = False
         self._index_persist_task: asyncio.Task[None] | None = None
         self._state_dirty = False
         self._state_persist_task: asyncio.Task[None] | None = None
-        self._file_info_seconds_per_mb = 1.0 / TELEGRAM_FILE_INFO_DEFAULT_MB_PER_SECOND
 
     async def start(self) -> None:
         if self._poll_client is None:
@@ -478,7 +495,13 @@ class TelegramService:
         size_text = self._format_file_size_clean(public_file.file_size)
         if size_text != "未知":
             lines.append(f"文件大小：{size_text}")
-        lines.append(self._build_file_info_eta_line(file_size=public_file.file_size, elapsed_seconds=0.0))
+        lines.append(
+            self._build_file_info_eta_line(
+                file_size=public_file.file_size,
+                duration_seconds=public_file.duration_seconds,
+                elapsed_seconds=0.0,
+            )
+        )
         return "\n".join(lines)
 
     def _build_file_info_wait_text(
@@ -486,6 +509,7 @@ class TelegramService:
         *,
         file_name: str,
         file_size: int | None,
+        duration_seconds: int | None,
         elapsed_seconds: float,
     ) -> str:
         lines = [
@@ -497,12 +521,25 @@ class TelegramService:
         if size_text != "未知":
             lines.append(f"文件大小：{size_text}")
         lines.append(f"已等待：{self._format_duration_compact(elapsed_seconds)}")
-        lines.append(self._build_file_info_eta_line(file_size=file_size, elapsed_seconds=elapsed_seconds))
+        lines.append(
+            self._build_file_info_eta_line(
+                file_size=file_size,
+                duration_seconds=duration_seconds,
+                elapsed_seconds=elapsed_seconds,
+            )
+        )
         return "\n".join(lines)
 
-    def _build_file_info_eta_line(self, *, file_size: int | None, elapsed_seconds: float) -> str:
+    def _build_file_info_eta_line(
+        self,
+        *,
+        file_size: int | None,
+        duration_seconds: int | None,
+        elapsed_seconds: float,
+    ) -> str:
         eta_seconds, from_estimate = self._estimate_file_info_remaining_seconds(
             file_size=file_size,
+            duration_seconds=duration_seconds,
             elapsed_seconds=elapsed_seconds,
         )
         eta_text = self._format_duration_compact(eta_seconds)
@@ -514,10 +551,14 @@ class TelegramService:
         self,
         *,
         file_size: int | None,
+        duration_seconds: int | None,
         elapsed_seconds: float,
     ) -> tuple[int, bool]:
         timeout_remaining = max(1, int(settings.telegram_file_timeout_seconds - elapsed_seconds + 0.999))
-        estimated_total = self._estimate_file_info_total_seconds(file_size=file_size)
+        estimated_total = self._estimate_file_info_total_seconds(
+            file_size=file_size,
+            duration_seconds=duration_seconds,
+        )
         if estimated_total is None:
             return timeout_remaining, False
 
@@ -526,27 +567,119 @@ class TelegramService:
             return estimated_remaining, True
         return timeout_remaining, False
 
-    def _estimate_file_info_total_seconds(self, *, file_size: int | None) -> int | None:
+    def _estimate_file_info_total_seconds(
+        self,
+        *,
+        file_size: int | None,
+        duration_seconds: int | None,
+    ) -> int | None:
+        estimates: list[tuple[float, float]] = []
+
+        linear_estimate = self._estimate_file_info_linear_seconds(file_size=file_size)
+        if linear_estimate is not None:
+            estimates.append((linear_estimate, 1.0))
+
+        size_bucket = self._get_file_size_bucket_label(file_size)
+        if size_bucket is not None:
+            bucket_stats = self._file_info_eta_state.size_buckets.get(size_bucket)
+            if bucket_stats is not None and bucket_stats.sample_count > 0:
+                estimates.append(
+                    (
+                        bucket_stats.avg_elapsed_seconds,
+                        min(8.0, float(bucket_stats.sample_count)) * 2.0,
+                    )
+                )
+
+        duration_bucket = self._get_duration_bucket_label(duration_seconds)
+        if duration_bucket is not None:
+            bucket_stats = self._file_info_eta_state.duration_buckets.get(duration_bucket)
+            if bucket_stats is not None and bucket_stats.sample_count > 0:
+                estimates.append(
+                    (
+                        bucket_stats.avg_elapsed_seconds,
+                        min(6.0, float(bucket_stats.sample_count)) * 1.5,
+                    )
+                )
+
+        overall_stats = self._file_info_eta_state.overall
+        if overall_stats.sample_count > 0:
+            estimates.append(
+                (
+                    overall_stats.avg_elapsed_seconds,
+                    min(4.0, float(overall_stats.sample_count)),
+                )
+            )
+
+        if not estimates:
+            return None
+
+        weighted_seconds = sum(seconds * weight for seconds, weight in estimates) / sum(weight for _, weight in estimates)
+        bounded_seconds = min(float(settings.telegram_file_timeout_seconds), weighted_seconds)
+        return max(1, int(bounded_seconds + 0.999))
+
+    def _estimate_file_info_linear_seconds(self, *, file_size: int | None) -> float | None:
         if not isinstance(file_size, int) or file_size <= 0:
             return None
 
         size_mb = max(1.0, file_size / (1024 * 1024))
-        estimated_seconds = TELEGRAM_FILE_INFO_ESTIMATE_BASE_SECONDS + (size_mb * self._file_info_seconds_per_mb)
-        bounded_seconds = min(float(settings.telegram_file_timeout_seconds), estimated_seconds)
-        return max(1, int(bounded_seconds + 0.999))
+        return TELEGRAM_FILE_INFO_ESTIMATE_BASE_SECONDS + (size_mb * self._file_info_eta_state.seconds_per_mb)
 
-    def _record_file_info_duration(self, *, file_size: int | None, elapsed_seconds: float) -> None:
-        if not isinstance(file_size, int) or file_size <= 0 or elapsed_seconds <= 0:
+    def _record_file_info_duration(
+        self,
+        *,
+        file_size: int | None,
+        duration_seconds: int | None,
+        elapsed_seconds: float,
+    ) -> None:
+        if elapsed_seconds <= 0:
             return
 
-        size_mb = max(1.0, file_size / (1024 * 1024))
-        observed_seconds_per_mb = elapsed_seconds / size_mb
-        clamped_seconds_per_mb = min(10.0, max(0.01, observed_seconds_per_mb))
-        alpha = 0.25
-        self._file_info_seconds_per_mb = (
-            (1.0 - alpha) * self._file_info_seconds_per_mb
-            + alpha * clamped_seconds_per_mb
-        )
+        self._update_timing_average(self._file_info_eta_state.overall, elapsed_seconds)
+
+        size_bucket = self._get_file_size_bucket_label(file_size)
+        if size_bucket is not None:
+            bucket_stats = self._file_info_eta_state.size_buckets.setdefault(size_bucket, TelegramTimingAverage())
+            self._update_timing_average(bucket_stats, elapsed_seconds)
+
+        duration_bucket = self._get_duration_bucket_label(duration_seconds)
+        if duration_bucket is not None:
+            bucket_stats = self._file_info_eta_state.duration_buckets.setdefault(duration_bucket, TelegramTimingAverage())
+            self._update_timing_average(bucket_stats, elapsed_seconds)
+
+        if isinstance(file_size, int) and file_size > 0:
+            size_mb = max(1.0, file_size / (1024 * 1024))
+            observed_seconds_per_mb = elapsed_seconds / size_mb
+            clamped_seconds_per_mb = min(10.0, max(0.01, observed_seconds_per_mb))
+            alpha = 0.25
+            self._file_info_eta_state.seconds_per_mb = (
+                (1.0 - alpha) * self._file_info_eta_state.seconds_per_mb
+                + alpha * clamped_seconds_per_mb
+            )
+
+        self._mark_state_dirty()
+
+    def _update_timing_average(self, stats: TelegramTimingAverage, elapsed_seconds: float) -> None:
+        stats.sample_count += 1
+        stats.avg_elapsed_seconds += (elapsed_seconds - stats.avg_elapsed_seconds) / stats.sample_count
+
+    def _get_file_size_bucket_label(self, file_size: int | None) -> str | None:
+        if not isinstance(file_size, int) or file_size <= 0:
+            return None
+
+        size_mb = max(1, int((file_size / (1024 * 1024)) + 0.999))
+        for upper_bound in (50, 100, 250, 500, 1024, 2048):
+            if size_mb <= upper_bound:
+                return f"size_le_{upper_bound}mb"
+        return "size_gt_2048mb"
+
+    def _get_duration_bucket_label(self, duration_seconds: int | None) -> str | None:
+        if not isinstance(duration_seconds, int) or duration_seconds <= 0:
+            return None
+
+        for upper_bound in (60, 180, 600, 1800, 3600):
+            if duration_seconds <= upper_bound:
+                return f"duration_le_{upper_bound}s"
+        return "duration_gt_3600s"
 
     def _build_finalize_progress_text(self, *, file_name: str, step_text: str) -> str:
         return "\n".join(
@@ -1057,6 +1190,7 @@ class TelegramService:
                     file_name=media.file_name,
                     content_type=media.content_type,
                     file_size=media.file_size,
+                    duration_seconds=media.duration_seconds,
                     source_chat_id=chat_id,
                     source_message_id=message_id,
                     created_at=now,
@@ -1071,6 +1205,7 @@ class TelegramService:
                 public_file.file_name = media.file_name
                 public_file.content_type = media.content_type
                 public_file.file_size = media.file_size
+                public_file.duration_seconds = media.duration_seconds
                 public_file.source_chat_id = chat_id
                 public_file.source_message_id = message_id
                 public_file.updated_at = now
@@ -1295,6 +1430,7 @@ class TelegramService:
             file_path = await self._refresh_file_path(public_file)
             self._record_file_info_duration(
                 file_size=public_file.file_size,
+                duration_seconds=public_file.duration_seconds,
                 elapsed_seconds=monotonic() - started_at,
             )
             return file_path
@@ -1326,6 +1462,7 @@ class TelegramService:
                 text=self._build_file_info_wait_text(
                     file_name=public_file.file_name,
                     file_size=public_file.file_size,
+                    duration_seconds=public_file.duration_seconds,
                     elapsed_seconds=monotonic() - started_at,
                 ),
             )
@@ -1990,6 +2127,9 @@ class TelegramService:
         file_size = payload.get("file_size")
         if not isinstance(file_size, int):
             file_size = None
+        duration_seconds = payload.get("duration")
+        if not isinstance(duration_seconds, int):
+            duration_seconds = None
 
         return TelegramIncomingMedia(
             telegram_file_id=telegram_file_id,
@@ -1997,6 +2137,7 @@ class TelegramService:
             file_name=file_name,
             content_type=content_type,
             file_size=file_size,
+            duration_seconds=duration_seconds,
         )
 
     def _build_public_file_name(self, payload: dict[str, Any], content_type: str) -> str:
@@ -2147,11 +2288,14 @@ class TelegramService:
 
             file_path = item.get("file_path")
             file_size = item.get("file_size")
+            duration_seconds = item.get("duration_seconds")
             cached_output_file_id = item.get("cached_output_file_id")
             if not isinstance(file_path, str):
                 file_path = None
             if not isinstance(file_size, int):
                 file_size = None
+            if not isinstance(duration_seconds, int):
+                duration_seconds = None
             if not isinstance(cached_output_file_id, str):
                 cached_output_file_id = None
 
@@ -2164,6 +2308,7 @@ class TelegramService:
                 file_name=file_name,
                 content_type=content_type,
                 file_size=file_size,
+                duration_seconds=duration_seconds,
                 source_chat_id=source_chat_id,
                 source_message_id=source_message_id,
                 created_at=created_at,
@@ -2185,6 +2330,7 @@ class TelegramService:
                 "file_name": item.file_name,
                 "content_type": item.content_type,
                 "file_size": item.file_size,
+                "duration_seconds": item.duration_seconds,
                 "source_chat_id": item.source_chat_id,
                 "source_message_id": item.source_message_id,
                 "created_at": item.created_at.isoformat(),
@@ -2233,30 +2379,116 @@ class TelegramService:
             index[public_file.telegram_file_unique_id] = public_id
         return index
 
-    def _load_state(self) -> int:
+    def _load_state(self) -> dict[str, object]:
         state_path = settings.telegram_state_path
         if not state_path.exists():
-            return 0
+            return {
+                "update_offset": 0,
+                "file_info_eta_state": TelegramFileInfoEtaState(),
+            }
 
         try:
             raw_data = json.loads(state_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             logger.exception("failed to load telegram bot state: %s", state_path)
-            return 0
+            return {
+                "update_offset": 0,
+                "file_info_eta_state": TelegramFileInfoEtaState(),
+            }
+
+        if not isinstance(raw_data, dict):
+            return {
+                "update_offset": 0,
+                "file_info_eta_state": TelegramFileInfoEtaState(),
+            }
 
         offset = raw_data.get("update_offset")
-        if isinstance(offset, int) and offset >= 0:
-            return offset
-        return 0
+        if not isinstance(offset, int) or offset < 0:
+            offset = 0
+        return {
+            "update_offset": offset,
+            "file_info_eta_state": self._parse_file_info_eta_state(raw_data.get("file_info_eta_state")),
+        }
 
     def _write_state(self) -> None:
         state_path = settings.telegram_state_path
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"update_offset": self._update_offset}
+        payload = {
+            "update_offset": self._update_offset,
+            "file_info_eta_state": self._serialize_file_info_eta_state(),
+        }
         state_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    def _parse_file_info_eta_state(self, payload: object) -> TelegramFileInfoEtaState:
+        state = TelegramFileInfoEtaState()
+        if not isinstance(payload, dict):
+            return state
+
+        seconds_per_mb = payload.get("seconds_per_mb")
+        if isinstance(seconds_per_mb, (int, float)) and seconds_per_mb > 0:
+            state.seconds_per_mb = float(seconds_per_mb)
+
+        overall = self._parse_timing_average(payload.get("overall"))
+        if overall is not None:
+            state.overall = overall
+
+        size_buckets = payload.get("size_buckets")
+        if isinstance(size_buckets, dict):
+            for key, value in size_buckets.items():
+                if not isinstance(key, str):
+                    continue
+                parsed = self._parse_timing_average(value)
+                if parsed is not None:
+                    state.size_buckets[key] = parsed
+
+        duration_buckets = payload.get("duration_buckets")
+        if isinstance(duration_buckets, dict):
+            for key, value in duration_buckets.items():
+                if not isinstance(key, str):
+                    continue
+                parsed = self._parse_timing_average(value)
+                if parsed is not None:
+                    state.duration_buckets[key] = parsed
+
+        return state
+
+    def _parse_timing_average(self, payload: object) -> TelegramTimingAverage | None:
+        if not isinstance(payload, dict):
+            return None
+
+        sample_count = payload.get("sample_count")
+        avg_elapsed_seconds = payload.get("avg_elapsed_seconds")
+        if not isinstance(sample_count, int) or sample_count <= 0:
+            return None
+        if not isinstance(avg_elapsed_seconds, (int, float)) or avg_elapsed_seconds <= 0:
+            return None
+        return TelegramTimingAverage(
+            sample_count=sample_count,
+            avg_elapsed_seconds=float(avg_elapsed_seconds),
+        )
+
+    def _serialize_file_info_eta_state(self) -> dict[str, object]:
+        return {
+            "seconds_per_mb": self._file_info_eta_state.seconds_per_mb,
+            "overall": self._serialize_timing_average(self._file_info_eta_state.overall),
+            "size_buckets": {
+                key: self._serialize_timing_average(value)
+                for key, value in self._file_info_eta_state.size_buckets.items()
+            },
+            "duration_buckets": {
+                key: self._serialize_timing_average(value)
+                for key, value in self._file_info_eta_state.duration_buckets.items()
+            },
+        }
+
+    def _serialize_timing_average(self, stats: TelegramTimingAverage) -> dict[str, object]:
+        return {
+            "sample_count": stats.sample_count,
+            "avg_elapsed_seconds": stats.avg_elapsed_seconds,
+        }
 
     def _mark_state_dirty(self) -> None:
         self._state_dirty = True
