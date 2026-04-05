@@ -8,7 +8,7 @@ import string
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qs, urlparse, urlunparse
 from uuid import uuid4
 
 from fastapi import HTTPException, status
@@ -104,6 +104,7 @@ class TaskService:
         parsed = urlparse(source_url)
         host = parsed.netloc.lower()
         path = parsed.path.rstrip("/")
+        query = parse_qs(parsed.query)
 
         if host in {"www.douyin.com", "douyin.com"}:
             note_match = re.fullmatch(r"/note/(?P<item_id>\d+)", path)
@@ -113,6 +114,20 @@ class TaskService:
                         parsed.scheme or "https",
                         "www.douyin.com",
                         f"/video/{note_match.group('item_id')}",
+                        "",
+                        "",
+                        "",
+                    )
+                )
+
+            # 抖音搜索页/发现页分享常带 modal_id，真实目标其实是具体视频页。
+            modal_id = self._extract_douyin_modal_id(query)
+            if modal_id is not None:
+                return urlunparse(
+                    (
+                        parsed.scheme or "https",
+                        "www.douyin.com",
+                        f"/video/{modal_id}",
                         "",
                         "",
                         "",
@@ -134,6 +149,15 @@ class TaskService:
                 )
 
         return source_url
+
+    def _extract_douyin_modal_id(self, query: dict[str, list[str]]) -> str | None:
+        for key in ("modal_id", "item_id", "aweme_id"):
+            values = query.get(key) or []
+            for value in values:
+                normalized = value.strip()
+                if normalized.isdigit():
+                    return normalized
+        return None
 
     async def get_task(self, task_id: str) -> TaskRecord | None:
         async with self._lock:
