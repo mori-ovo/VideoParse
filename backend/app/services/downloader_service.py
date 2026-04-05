@@ -15,6 +15,7 @@ from urllib.parse import urlunparse
 
 from app.core.config import settings
 from app.schemas.task import Platform
+from app.services.douyin_service import douyin_service
 from app.services.third_party_fallback_service import (
     ThirdPartyFallbackError,
     third_party_fallback_service,
@@ -181,6 +182,11 @@ class DownloaderService:
     def _extract_metadata_sync(self, url: str) -> ExtractedMedia:
         url = self._normalize_source_url(url)
         platform = self._detect_platform(url)
+
+        if platform == Platform.DOUYIN:
+            douyin_media = self._resolve_douyin_metadata(url)
+            if douyin_media is not None:
+                return douyin_media
 
         # YouTube 在低配机器上容易踩 bot check 或 JS 运行时问题，先走更稳的兜底。
         if platform in {Platform.YOUTUBE, Platform.IWARA}:
@@ -668,6 +674,39 @@ class DownloaderService:
             audio_headers={},
         )
 
+    def _resolve_douyin_metadata(self, url: str) -> ExtractedMedia | None:
+        request_options = self._resolve_platform_request_options(url)
+        if request_options.cookies_file is not None and not request_options.cookie_header:
+            return None
+
+        user_agent = request_options.user_agent or DOUYIN_BROWSER_USER_AGENT
+        media = douyin_service.resolve_media(
+            url=url,
+            cookie_header=request_options.cookie_header,
+            user_agent=user_agent,
+        )
+        if media is None:
+            return None
+
+        return ExtractedMedia(
+            title=media.title,
+            requires_merge=False,
+            direct_playable=True,
+            uploader=media.uploader,
+            duration=media.duration,
+            thumbnail=media.thumbnail,
+            extractor="douyin-web",
+            direct_url=media.direct_url,
+            video_url=None,
+            audio_url=None,
+            direct_ext=media.direct_ext,
+            video_ext=None,
+            audio_ext=None,
+            direct_headers=media.headers,
+            video_headers={},
+            audio_headers={},
+        )
+
     def _build_configured_extractor_args(
         self,
         platform: Platform | None,
@@ -771,6 +810,12 @@ class DownloaderService:
             cookie_header = self._build_douyin_cookie_header() or cookie_header
             cookies_file = settings.douyin_cookies_file or cookies_file
             user_agent = settings.douyin_user_agent or user_agent or DOUYIN_BROWSER_USER_AGENT
+            if not cookies_file:
+                cookie_header = douyin_service.enrich_cookie_header(
+                    url=url,
+                    cookie_header=cookie_header,
+                    user_agent=user_agent,
+                ) or cookie_header
         elif platform == Platform.IWARA:
             # 这些头既供 yt-dlp 尝试 Iwara 提取器使用，也供官方 API 兜底共用。
             cookie_header = self._normalize_cookie_header(settings.iwara_cookies) or cookie_header
@@ -941,6 +986,7 @@ class DownloaderService:
                     hints.append(
                         "当前已配置 Douyin Cookie，但可能已经失效；请重新导出最新 Cookie，至少确保包含 s_v_web_id、ttwid、msToken 等字段"
                     )
+                hints.append("后端已尝试自动补齐 ttwid、msToken 和 s_v_web_id；如果仍然失败，请同时补充 __ac_signature，或直接使用浏览器完整 Cookie")
                 hints.append("第三方 Douyin 兜底接口当前不稳定，建议优先依赖浏览器 Cookie 方案")
             elif "Unsupported URL" in message and "/note/" in url:
                 hints.append("当前链接是 note 形式，后端会自动转换为 /video/{id} 后再解析")
