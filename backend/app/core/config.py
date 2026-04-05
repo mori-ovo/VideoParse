@@ -154,8 +154,12 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("TELEGRAM_POLL_INTERVAL_SECONDS", "TG_POLL_INTERVAL_SECONDS"),
     )
     telegram_file_timeout_seconds: int = Field(
-        default=180,
+        default=600,
         validation_alias=AliasChoices("TELEGRAM_FILE_TIMEOUT_SECONDS", "TG_FILE_TIMEOUT_SECONDS"),
+    )
+    telegram_sync_cache_max_mb: int = Field(
+        default=300,
+        validation_alias=AliasChoices("TELEGRAM_SYNC_CACHE_MAX_MB", "TG_SYNC_CACHE_MAX_MB"),
     )
     telegram_file_prefetch_enabled: bool = Field(
         default=False,
