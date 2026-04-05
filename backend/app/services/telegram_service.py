@@ -746,6 +746,60 @@ class TelegramService:
         if last_error is not None:
             logger.warning("telegram background caching gave up: public_id=%s error=%s", public_id, last_error)
 
+    async def _handle_media_update(
+        self,
+        *,
+        message: dict[str, Any],
+        chat_id: int,
+        media: TelegramIncomingMedia,
+    ) -> None:
+        reply_to_message_id = self._extract_message_id(message)
+        if reply_to_message_id is None:
+            raise TelegramServiceError("Telegram message is missing message_id.")
+
+        progress_message = await self._create_progress_message(
+            chat_id=chat_id,
+            reply_to_message_id=reply_to_message_id,
+            text="正在生成视频链接...",
+        )
+        public_file = await self._register_media(
+            media=media,
+            chat_id=chat_id,
+            message_id=reply_to_message_id,
+        )
+
+        link = storage_service.build_stream_url(public_file.public_id, public_file.file_name)
+        cached_locally = False
+        cached_output = await self._get_cached_output_file(public_file)
+        if cached_output is not None:
+            cached_locally = True
+        elif public_file.file_path:
+            cached_locally = self._resolve_accessible_local_path(public_file.file_path) is not None
+
+        completion_text = self._build_completion_message(
+            link=link,
+            cached_locally=cached_locally,
+            cache_pending=not cached_locally,
+        )
+        if progress_message is not None:
+            await self._safe_edit_message(
+                chat_id=progress_message.chat_id,
+                message_id=progress_message.message_id,
+                text=completion_text,
+            )
+        else:
+            await self._safe_send_message(
+                chat_id=chat_id,
+                text=completion_text,
+                reply_to_message_id=reply_to_message_id,
+            )
+
+        if not cached_locally:
+            self._schedule_background_prepare(
+                public_id=public_file.public_id,
+                progress_message=progress_message,
+            )
+
     async def handle_update(self, update: dict[str, Any]) -> None:
         message = self._extract_update_message(update)
         if message is None:
