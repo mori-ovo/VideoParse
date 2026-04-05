@@ -7,6 +7,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
+def env_alias_choices(*names: str) -> AliasChoices:
+    expanded_names: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        for candidate in (name.lower(), name):
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            expanded_names.append(candidate)
+    return AliasChoices(*expanded_names)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / "backend" / ".env",
@@ -26,192 +38,225 @@ class Settings(BaseSettings):
 
     proxy: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("PROXY", "YT_DLP_PROXY"),
+        validation_alias=env_alias_choices("PROXY", "YT_DLP_PROXY"),
     )
     cookies: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("COOKIES", "YT_DLP_COOKIES"),
+        validation_alias=env_alias_choices("COOKIES", "YT_DLP_COOKIES"),
     )
     cookies_file: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("COOKIES_FILE", "YT_DLP_COOKIES_FILE"),
+        validation_alias=env_alias_choices("COOKIES_FILE", "YT_DLP_COOKIES_FILE"),
     )
     user_agent: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("USER_AGENT", "YT_DLP_USER_AGENT"),
+        validation_alias=env_alias_choices("USER_AGENT", "YT_DLP_USER_AGENT"),
     )
 
     bilibili_proxy: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("BILIBILI_PROXY", "YT_DLP_BILIBILI_PROXY"),
+        validation_alias=env_alias_choices("BILIBILI_PROXY", "YT_DLP_BILIBILI_PROXY"),
     )
     bilibili_cookies: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("BILIBILI_COOKIES", "YT_DLP_BILIBILI_COOKIES"),
+        validation_alias=env_alias_choices("BILIBILI_COOKIES", "YT_DLP_BILIBILI_COOKIES"),
     )
     bilibili_cookies_file: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("BILIBILI_COOKIES_FILE", "YT_DLP_BILIBILI_COOKIES_FILE"),
+        validation_alias=env_alias_choices("BILIBILI_COOKIES_FILE", "YT_DLP_BILIBILI_COOKIES_FILE"),
     )
     bilibili_sessdata: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("BILIBILI_SESSDATA"),
+        validation_alias=env_alias_choices("BILIBILI_SESSDATA"),
     )
     bilibili_bili_jct: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("BILIBILI_BILI_JCT"),
+        validation_alias=env_alias_choices("BILIBILI_BILI_JCT"),
     )
     bilibili_dedeuserid: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("BILIBILI_DEDEUSERID", "BILIBILI_DEDE_USER_ID"),
+        validation_alias=env_alias_choices("BILIBILI_DEDEUSERID", "BILIBILI_DEDE_USER_ID"),
     )
 
     youtube_cookies: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("YOUTUBE_COOKIES", "YT_DLP_YOUTUBE_COOKIES"),
+        validation_alias=env_alias_choices("YOUTUBE_COOKIES", "YT_DLP_YOUTUBE_COOKIES"),
     )
     youtube_cookies_file: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("YOUTUBE_COOKIES_FILE", "YT_DLP_YOUTUBE_COOKIES_FILE"),
+        validation_alias=env_alias_choices("YOUTUBE_COOKIES_FILE", "YT_DLP_YOUTUBE_COOKIES_FILE"),
     )
     youtube_player_client: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("YOUTUBE_PLAYER_CLIENT"),
+        validation_alias=env_alias_choices("YOUTUBE_PLAYER_CLIENT"),
     )
     youtube_po_token: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("YOUTUBE_PO_TOKEN"),
+        validation_alias=env_alias_choices("YOUTUBE_PO_TOKEN"),
     )
     youtube_js_runtimes: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("YOUTUBE_JS_RUNTIMES"),
+        validation_alias=env_alias_choices("YOUTUBE_JS_RUNTIMES"),
     )
     youtube_remote_components: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("YOUTUBE_REMOTE_COMPONENTS"),
+        validation_alias=env_alias_choices("YOUTUBE_REMOTE_COMPONENTS"),
     )
 
     twitter_cookies: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("TWITTER_COOKIES", "YT_DLP_TWITTER_COOKIES"),
+        validation_alias=env_alias_choices("TWITTER_COOKIES", "YT_DLP_TWITTER_COOKIES"),
     )
     twitter_cookies_file: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("TWITTER_COOKIES_FILE", "YT_DLP_TWITTER_COOKIES_FILE"),
+        validation_alias=env_alias_choices("TWITTER_COOKIES_FILE", "YT_DLP_TWITTER_COOKIES_FILE"),
     )
     twitter_auth_token: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("TWITTER_AUTH_TOKEN"),
+        validation_alias=env_alias_choices("TWITTER_AUTH_TOKEN"),
     )
     twitter_ct0: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("TWITTER_CT0"),
+        validation_alias=env_alias_choices("TWITTER_CT0"),
     )
 
+    # 抖音完整 Cookie 串，优先级最高；已经有浏览器导出的整串时直接填这个。
     douyin_cookies: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("DOUYIN_COOKIES"),
+        validation_alias=env_alias_choices("DOUYIN_COOKIES"),
     )
+    # 抖音 Netscape 格式 Cookie 文件路径；只有在不填完整 Cookie 串时才会使用。
     douyin_cookies_file: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("DOUYIN_COOKIES_FILE"),
+        validation_alias=env_alias_choices("DOUYIN_COOKIES_FILE"),
     )
+    # 抖音浏览器 User-Agent，建议和导出 Cookie 的浏览器保持一致。
     douyin_user_agent: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("DOUYIN_USER_AGENT"),
+        validation_alias=env_alias_choices("DOUYIN_USER_AGENT"),
+    )
+    # 抖音 Web 指纹字段，缺失时常见报错是 Fresh cookies。
+    douyin_s_v_web_id: str | None = Field(
+        default=None,
+        validation_alias=env_alias_choices("DOUYIN_S_V_WEB_ID"),
+    )
+    # 抖音访客会话标识，常用于基础风控识别。
+    douyin_ttwid: str | None = Field(
+        default=None,
+        validation_alias=env_alias_choices("DOUYIN_TTWID"),
+    )
+    # 抖音风控相关 Token，很多详情请求都依赖它。
+    douyin_ms_token: str | None = Field(
+        default=None,
+        validation_alias=env_alias_choices("DOUYIN_MS_TOKEN"),
+    )
+    # 抖音挑战参数之一，通常和 ac_signature 配套出现。
+    douyin_ac_nonce: str | None = Field(
+        default=None,
+        validation_alias=env_alias_choices("DOUYIN_AC_NONCE"),
+    )
+    # 抖音签名参数，部分视频详情请求会校验它。
+    douyin_ac_signature: str | None = Field(
+        default=None,
+        validation_alias=env_alias_choices("DOUYIN_AC_SIGNATURE"),
+    )
+    # 抖音设备/会话标识，某些场景会参与校验。
+    douyin_odin_tt: str | None = Field(
+        default=None,
+        validation_alias=env_alias_choices("DOUYIN_ODIN_TT"),
     )
 
     iwara_authorization: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("IWARA_AUTHORIZATION", "IWARA_BEARER_TOKEN"),
+        validation_alias=env_alias_choices("IWARA_AUTHORIZATION", "IWARA_BEARER_TOKEN"),
     )
     iwara_cookies: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("IWARA_COOKIES"),
+        validation_alias=env_alias_choices("IWARA_COOKIES"),
     )
     iwara_user_agent: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("IWARA_USER_AGENT"),
+        validation_alias=env_alias_choices("IWARA_USER_AGENT"),
     )
 
     telegram_bot_token: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("TELEGRAM_BOT_TOKEN", "TG_BOT_TOKEN"),
+        validation_alias=env_alias_choices("TELEGRAM_BOT_TOKEN", "TG_BOT_TOKEN"),
     )
     telegram_bot_api_base: str = Field(
         default="http://127.0.0.1:8081",
-        validation_alias=AliasChoices("TELEGRAM_BOT_API_BASE", "TG_BOT_API_BASE"),
+        validation_alias=env_alias_choices("TELEGRAM_BOT_API_BASE", "TG_BOT_API_BASE"),
     )
     telegram_polling_enabled: bool = Field(
         default=True,
-        validation_alias=AliasChoices("TELEGRAM_POLLING_ENABLED", "TG_POLLING_ENABLED"),
+        validation_alias=env_alias_choices("TELEGRAM_POLLING_ENABLED", "TG_POLLING_ENABLED"),
     )
     telegram_update_mode: str = Field(
         default="polling",
-        validation_alias=AliasChoices("TELEGRAM_UPDATE_MODE", "TG_UPDATE_MODE"),
+        validation_alias=env_alias_choices("TELEGRAM_UPDATE_MODE", "TG_UPDATE_MODE"),
     )
     telegram_webhook_url: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("TELEGRAM_WEBHOOK_URL", "TG_WEBHOOK_URL"),
+        validation_alias=env_alias_choices("TELEGRAM_WEBHOOK_URL", "TG_WEBHOOK_URL"),
     )
     telegram_webhook_secret: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("TELEGRAM_WEBHOOK_SECRET", "TG_WEBHOOK_SECRET"),
+        validation_alias=env_alias_choices("TELEGRAM_WEBHOOK_SECRET", "TG_WEBHOOK_SECRET"),
     )
     telegram_poll_timeout_seconds: int = Field(
         default=20,
-        validation_alias=AliasChoices("TELEGRAM_POLL_TIMEOUT_SECONDS", "TG_POLL_TIMEOUT_SECONDS"),
+        validation_alias=env_alias_choices("TELEGRAM_POLL_TIMEOUT_SECONDS", "TG_POLL_TIMEOUT_SECONDS"),
     )
     telegram_poll_interval_seconds: int = Field(
         default=2,
-        validation_alias=AliasChoices("TELEGRAM_POLL_INTERVAL_SECONDS", "TG_POLL_INTERVAL_SECONDS"),
+        validation_alias=env_alias_choices("TELEGRAM_POLL_INTERVAL_SECONDS", "TG_POLL_INTERVAL_SECONDS"),
     )
     telegram_file_timeout_seconds: int = Field(
         default=600,
-        validation_alias=AliasChoices("TELEGRAM_FILE_TIMEOUT_SECONDS", "TG_FILE_TIMEOUT_SECONDS"),
+        validation_alias=env_alias_choices("TELEGRAM_FILE_TIMEOUT_SECONDS", "TG_FILE_TIMEOUT_SECONDS"),
     )
     telegram_sync_cache_max_mb: int = Field(
         default=300,
-        validation_alias=AliasChoices("TELEGRAM_SYNC_CACHE_MAX_MB", "TG_SYNC_CACHE_MAX_MB"),
+        validation_alias=env_alias_choices("TELEGRAM_SYNC_CACHE_MAX_MB", "TG_SYNC_CACHE_MAX_MB"),
     )
     telegram_file_prefetch_enabled: bool = Field(
         default=False,
-        validation_alias=AliasChoices("TELEGRAM_FILE_PREFETCH_ENABLED", "TG_FILE_PREFETCH_ENABLED"),
+        validation_alias=env_alias_choices("TELEGRAM_FILE_PREFETCH_ENABLED", "TG_FILE_PREFETCH_ENABLED"),
     )
     telegram_local_file_source_prefix: str | None = Field(
         default=None,
-        validation_alias=AliasChoices(
+        validation_alias=env_alias_choices(
             "TELEGRAM_LOCAL_FILE_SOURCE_PREFIX",
             "TG_LOCAL_FILE_SOURCE_PREFIX",
         ),
     )
     telegram_local_file_target_prefix: str | None = Field(
         default=None,
-        validation_alias=AliasChoices(
+        validation_alias=env_alias_choices(
             "TELEGRAM_LOCAL_FILE_TARGET_PREFIX",
             "TG_LOCAL_FILE_TARGET_PREFIX",
         ),
     )
     telegram_allowed_chat_ids: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("TELEGRAM_ALLOWED_CHAT_IDS", "TG_ALLOWED_CHAT_IDS"),
+        validation_alias=env_alias_choices("TELEGRAM_ALLOWED_CHAT_IDS", "TG_ALLOWED_CHAT_IDS"),
     )
 
     download_format: str = Field(
         default="bestvideo*[height<=1080]+bestaudio/best[height<=1080]/best",
-        validation_alias=AliasChoices("DOWNLOAD_FORMAT", "YT_DLP_DOWNLOAD_FORMAT"),
+        validation_alias=env_alias_choices("DOWNLOAD_FORMAT", "YT_DLP_DOWNLOAD_FORMAT"),
     )
     # yt-dlp 对支持分片的源站启用并发分片下载，用来改善长视频吞吐。
     download_concurrent_fragment_downloads: int = Field(
         default=4,
-        validation_alias=AliasChoices(
+        validation_alias=env_alias_choices(
             "DOWNLOAD_CONCURRENT_FRAGMENT_DOWNLOADS",
             "YT_DLP_CONCURRENT_FRAGMENT_DOWNLOADS",
         ),
     )
     merge_output_format: str = Field(
         default="mp4",
-        validation_alias=AliasChoices("MERGE_OUTPUT_FORMAT", "YT_DLP_MERGE_OUTPUT_FORMAT"),
+        validation_alias=env_alias_choices("MERGE_OUTPUT_FORMAT", "YT_DLP_MERGE_OUTPUT_FORMAT"),
     )
     ffmpeg_location: str | None = None
     proxy_timeout_seconds: int = 30
@@ -219,28 +264,28 @@ class Settings(BaseSettings):
     proxy_max_connections: int = 20
     media_access_refresh_interval_seconds: int = Field(
         default=300,
-        validation_alias=AliasChoices(
+        validation_alias=env_alias_choices(
             "MEDIA_ACCESS_REFRESH_INTERVAL_SECONDS",
             "FILE_ACCESS_REFRESH_INTERVAL_SECONDS",
         ),
     )
     internal_media_redirect_header: str | None = Field(
         default=None,
-        validation_alias=AliasChoices(
+        validation_alias=env_alias_choices(
             "INTERNAL_MEDIA_REDIRECT_HEADER",
             "MEDIA_INTERNAL_REDIRECT_HEADER",
         ),
     )
     internal_media_redirect_root: str | None = Field(
         default=None,
-        validation_alias=AliasChoices(
+        validation_alias=env_alias_choices(
             "INTERNAL_MEDIA_REDIRECT_ROOT",
             "MEDIA_INTERNAL_REDIRECT_ROOT",
         ),
     )
     internal_media_redirect_prefix: str | None = Field(
         default=None,
-        validation_alias=AliasChoices(
+        validation_alias=env_alias_choices(
             "INTERNAL_MEDIA_REDIRECT_PREFIX",
             "MEDIA_INTERNAL_REDIRECT_PREFIX",
         ),
@@ -255,7 +300,7 @@ class Settings(BaseSettings):
     # 聚合重复的媒体访问日志，减少播放器分段请求导致的日志刷屏。
     media_access_log_aggregation_enabled: bool = Field(
         default=True,
-        validation_alias=AliasChoices(
+        validation_alias=env_alias_choices(
             "MEDIA_ACCESS_LOG_AGGREGATION_ENABLED",
             "FILE_ACCESS_LOG_AGGREGATION_ENABLED",
         ),
@@ -263,7 +308,7 @@ class Settings(BaseSettings):
     # 聚合窗口内的相同请求只输出一条摘要日志。
     media_access_log_window_seconds: int = Field(
         default=5,
-        validation_alias=AliasChoices(
+        validation_alias=env_alias_choices(
             "MEDIA_ACCESS_LOG_WINDOW_SECONDS",
             "FILE_ACCESS_LOG_WINDOW_SECONDS",
         ),

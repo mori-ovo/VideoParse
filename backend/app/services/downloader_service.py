@@ -814,7 +814,21 @@ class DownloaderService:
         )
 
     def _build_douyin_cookie_header(self) -> str | None:
-        return self._normalize_cookie_header(settings.douyin_cookies)
+        direct_value = self._normalize_cookie_header(settings.douyin_cookies)
+        if direct_value:
+            return direct_value
+
+        # 允许只填写抖音关键字段，后端自动拼成 Cookie 串。
+        return self._join_cookie_pairs(
+            {
+                "s_v_web_id": settings.douyin_s_v_web_id,
+                "ttwid": settings.douyin_ttwid,
+                "msToken": settings.douyin_ms_token,
+                "__ac_nonce": settings.douyin_ac_nonce,
+                "__ac_signature": settings.douyin_ac_signature,
+                "odin_tt": settings.douyin_odin_tt,
+            }
+        )
 
     def _join_cookie_pairs(self, cookie_map: dict[str, str | None]) -> str | None:
         pairs = [
@@ -921,7 +935,7 @@ class DownloaderService:
             if "Fresh cookies" in message or "Failed to download web detail JSON" in message:
                 if not self._has_douyin_cookies_configured():
                     hints.append(
-                        "请在 backend/.env 配置 DOUYIN_COOKIES 或 DOUYIN_COOKIES_FILE，建议直接使用浏览器最新导出的 Douyin Cookie"
+                        "请在 backend/.env 配置 douyin_cookies / douyin_cookies_file，或单独填写 douyin_s_v_web_id、douyin_ttwid、douyin_ms_token 等字段"
                     )
                 else:
                     hints.append(
@@ -948,6 +962,12 @@ class DownloaderService:
             [
                 settings.douyin_cookies,
                 settings.douyin_cookies_file,
+                settings.douyin_s_v_web_id,
+                settings.douyin_ttwid,
+                settings.douyin_ms_token,
+                settings.douyin_ac_nonce,
+                settings.douyin_ac_signature,
+                settings.douyin_odin_tt,
                 settings.cookies,
                 settings.cookies_file,
             ]
