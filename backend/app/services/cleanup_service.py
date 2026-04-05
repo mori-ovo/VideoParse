@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -46,12 +47,11 @@ class CleanupService:
         deleted_files = 0
         deleted_dirs = 0
 
-        # temp、cache、output 三个目录统一按最近修改时间清理。
         for directory in (settings.temp_dir, settings.cache_dir, settings.output_dir):
-            deleted_files += self._remove_expired_files(directory, threshold)
-            deleted_dirs += self._remove_empty_dirs(directory)
+            removed_files, removed_dirs = self._cleanup_directory(directory, threshold)
+            deleted_files += removed_files
+            deleted_dirs += removed_dirs
 
-        # 本地文件和 Telegram 短链索引都要同步修正，避免保留失效记录。
         pruned_index_entries = await storage_service.prune_missing_files()
         pruned_telegram_entries = await telegram_service.prune_expired_entries(threshold)
 
@@ -71,44 +71,37 @@ class CleanupService:
             "pruned_telegram_entries": pruned_telegram_entries,
         }
 
-    def _remove_expired_files(self, base_dir: Path, threshold: datetime) -> int:
+    def _cleanup_directory(self, base_dir: Path, threshold: datetime) -> tuple[int, int]:
         if not base_dir.exists():
-            return 0
+            return 0, 0
 
-        deleted = 0
-        for path in base_dir.rglob("*"):
-            if not path.is_file():
-                continue
-            if path.name.startswith("."):
-                continue
-            modified_at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
-            if modified_at >= threshold:
-                continue
-            try:
-                # Windows 下文件可能还被占用，清理任务不应该因为单个文件失败而中断。
-                path.unlink(missing_ok=True)
-                deleted += 1
-            except OSError:
-                continue
-        return deleted
-
-    def _remove_empty_dirs(self, base_dir: Path) -> int:
-        if not base_dir.exists():
-            return 0
-
-        deleted = 0
-        directories = sorted(
-            [path for path in base_dir.rglob("*") if path.is_dir()],
-            key=lambda item: len(item.parts),
-            reverse=True,
-        )
-        for directory in directories:
-            try:
-                directory.rmdir()
-                deleted += 1
-            except OSError:
-                continue
-        return deleted
+        deleted_files = 0
+        deleted_dirs = 0
+        for root, dirnames, filenames in os.walk(base_dir, topdown=False):
+            root_path = Path(root)
+            for file_name in filenames:
+                if file_name.startswith("."):
+                    continue
+                file_path = root_path / file_name
+                try:
+                    modified_at = datetime.fromtimestamp(file_path.stat().st_mtime, timezone.utc)
+                except OSError:
+                    continue
+                if modified_at >= threshold:
+                    continue
+                try:
+                    file_path.unlink(missing_ok=True)
+                    deleted_files += 1
+                except OSError:
+                    continue
+            for dirname in dirnames:
+                directory = root_path / dirname
+                try:
+                    directory.rmdir()
+                    deleted_dirs += 1
+                except OSError:
+                    continue
+        return deleted_files, deleted_dirs
 
 
 cleanup_service = CleanupService()

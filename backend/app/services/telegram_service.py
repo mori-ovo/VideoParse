@@ -47,6 +47,8 @@ TELEGRAM_BACKGROUND_PREPARE_MAX_ATTEMPTS = 5
 TELEGRAM_BACKGROUND_PREPARE_RETRY_SECONDS = 15
 TELEGRAM_TASK_POLL_INTERVAL_SECONDS = 1.5
 TELEGRAM_TASK_POLL_TIMEOUT_SECONDS = 900
+TELEGRAM_INDEX_PERSIST_DEBOUNCE_SECONDS = 1.0
+TELEGRAM_STATE_PERSIST_DEBOUNCE_SECONDS = 1.0
 
 URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
 PURE_BILIBILI_BV_PATTERN = re.compile(r"\b(BV[0-9A-Za-z]{10})\b", re.IGNORECASE)
@@ -130,6 +132,10 @@ class TelegramService:
         self._update_offset = self._load_state()
         self._last_error: str | None = None
         self._poll_error_streak = 0
+        self._index_dirty = False
+        self._index_persist_task: asyncio.Task[None] | None = None
+        self._state_dirty = False
+        self._state_persist_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         if self._poll_client is None:
@@ -186,6 +192,19 @@ class TelegramService:
                 task.cancel()
             await asyncio.gather(*self._background_prepare_tasks.values(), return_exceptions=True)
             self._background_prepare_tasks.clear()
+
+        await self._flush_pending_index_persist()
+        await self._flush_pending_state_persist()
+
+        if self._index_persist_task is not None:
+            self._index_persist_task.cancel()
+            await asyncio.gather(self._index_persist_task, return_exceptions=True)
+            self._index_persist_task = None
+
+        if self._state_persist_task is not None:
+            self._state_persist_task.cancel()
+            await asyncio.gather(self._state_persist_task, return_exceptions=True)
+            self._state_persist_task = None
 
         if self._poll_client is not None:
             await self._poll_client.aclose()
@@ -319,7 +338,7 @@ class TelegramService:
 
             current_file.last_accessed_at = datetime.now(timezone.utc)
             self._mark_public_file_access_refreshed(current_file.public_id)
-            self._persist_index_unlocked()
+            self._mark_index_dirty_unlocked()
             return current_file
 
     async def prune_expired_entries(self, threshold: datetime) -> int:
@@ -339,7 +358,7 @@ class TelegramService:
                 self._unique_index.pop(public_file.telegram_file_unique_id, None)
                 self._access_refresh_after.pop(public_id, None)
 
-            self._persist_index_unlocked()
+            self._write_index_unlocked()
             return len(expired_ids)
 
     async def get_link_by_message(self, message: dict[str, Any]) -> tuple[str, str] | None:
@@ -837,7 +856,7 @@ class TelegramService:
                 update_id = update.get("update_id")
                 if isinstance(update_id, int):
                     self._update_offset = max(self._update_offset, update_id + 1)
-                    self._persist_state()
+                    self._mark_state_dirty()
                 self._schedule_update_handling(update=update, update_id=update_id)
 
     async def _sleep_until_next_poll(self) -> None:
@@ -994,7 +1013,7 @@ class TelegramService:
                 public_file.last_accessed_at = now
 
             self._unique_index[media.telegram_file_unique_id] = public_id
-            self._persist_index_unlocked()
+            self._write_index_unlocked()
             return public_file
 
     def _schedule_file_path_prefetch(self, *, public_id: str) -> None:
@@ -1027,7 +1046,7 @@ class TelegramService:
                 return None
             current.cached_output_file_id = None
             current.updated_at = datetime.now(timezone.utc)
-            self._persist_index_unlocked()
+            self._mark_index_dirty_unlocked()
         return None
 
     async def _set_cached_output_file_id(self, public_id: str, cached_output_file_id: str) -> None:
@@ -1037,7 +1056,7 @@ class TelegramService:
                 return
             current.cached_output_file_id = cached_output_file_id
             current.updated_at = datetime.now(timezone.utc)
-            self._persist_index_unlocked()
+            self._mark_index_dirty_unlocked()
 
     async def _resolve_download_source(
         self,
@@ -1214,7 +1233,7 @@ class TelegramService:
                 return file_path
             current.file_path = file_path
             current.updated_at = datetime.now(timezone.utc)
-            self._persist_index_unlocked()
+            self._mark_index_dirty_unlocked()
             return current.file_path
 
     async def _get_file_path(self, telegram_file_id: str) -> str | None:
@@ -2004,7 +2023,7 @@ class TelegramService:
             )
         return files
 
-    def _persist_index_unlocked(self) -> None:
+    def _write_index_unlocked(self) -> None:
         index_path = settings.telegram_file_index_path
         index_path.parent.mkdir(parents=True, exist_ok=True)
         payload = [
@@ -2029,6 +2048,22 @@ class TelegramService:
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    def _mark_index_dirty_unlocked(self) -> None:
+        self._index_dirty = True
+        if self._index_persist_task is None or self._index_persist_task.done():
+            self._index_persist_task = asyncio.create_task(self._persist_index_loop())
+
+    async def _persist_index_loop(self) -> None:
+        try:
+            await asyncio.sleep(TELEGRAM_INDEX_PERSIST_DEBOUNCE_SECONDS)
+            async with self._lock:
+                if self._index_dirty:
+                    self._index_dirty = False
+                    self._write_index_unlocked()
+                self._index_persist_task = None
+        except asyncio.CancelledError:
+            return
 
     def _should_refresh_public_file_access(self, public_id: str) -> bool:
         interval_seconds = max(0, settings.media_access_refresh_interval_seconds)
@@ -2065,7 +2100,7 @@ class TelegramService:
             return offset
         return 0
 
-    def _persist_state(self) -> None:
+    def _write_state(self) -> None:
         state_path = settings.telegram_state_path
         state_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"update_offset": self._update_offset}
@@ -2073,6 +2108,36 @@ class TelegramService:
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    def _mark_state_dirty(self) -> None:
+        self._state_dirty = True
+        if self._state_persist_task is None or self._state_persist_task.done():
+            self._state_persist_task = asyncio.create_task(self._persist_state_loop())
+
+    async def _persist_state_loop(self) -> None:
+        try:
+            await asyncio.sleep(TELEGRAM_STATE_PERSIST_DEBOUNCE_SECONDS)
+            async with self._lock:
+                if self._state_dirty:
+                    self._state_dirty = False
+                    self._write_state()
+                self._state_persist_task = None
+        except asyncio.CancelledError:
+            return
+
+    async def _flush_pending_index_persist(self) -> None:
+        async with self._lock:
+            if not self._index_dirty:
+                return
+            self._index_dirty = False
+            self._write_index_unlocked()
+
+    async def _flush_pending_state_persist(self) -> None:
+        async with self._lock:
+            if not self._state_dirty:
+                return
+            self._state_dirty = False
+            self._write_state()
 
 
 telegram_service = TelegramService()

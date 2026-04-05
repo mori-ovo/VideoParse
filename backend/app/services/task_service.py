@@ -40,6 +40,7 @@ TERMINAL_TASK_STATUSES = {TaskStatus.SUCCESS, TaskStatus.FAILED}
 FFMPEG_MISSING_MESSAGE = (
     "当前资源需要音视频合流，但服务器未找到 ffmpeg。请先安装 ffmpeg 或配置 FFMPEG_LOCATION。"
 )
+TASK_INDEX_PERSIST_DEBOUNCE_SECONDS = 0.5
 
 
 class TaskService:
@@ -47,6 +48,8 @@ class TaskService:
         self._tasks: dict[str, TaskRecord] = self._load_tasks()
         self._file_id_index = self._build_file_id_index(self._tasks)
         self._lock = asyncio.Lock()
+        self._persist_dirty = False
+        self._persist_task: asyncio.Task[None] | None = None
 
     async def recover_tasks(self) -> None:
         async with self._lock:
@@ -71,7 +74,14 @@ class TaskService:
                 changed = True
 
             if changed:
-                self._persist_tasks()
+                self._persist_tasks_unlocked()
+
+    async def stop(self) -> None:
+        await self._flush_pending_persist()
+        if self._persist_task is not None:
+            self._persist_task.cancel()
+            await asyncio.gather(self._persist_task, return_exceptions=True)
+            self._persist_task = None
 
     async def create_task(self, payload: ParseRequest) -> TaskRecord:
         source_url = self.normalize_source_url(str(payload.url))
@@ -96,7 +106,7 @@ class TaskService:
 
         async with self._lock:
             self._tasks[task_id] = task
-            self._persist_tasks()
+            self._persist_tasks_unlocked()
         return task
 
     def normalize_source_url(self, source_url: str) -> str:
@@ -116,7 +126,7 @@ class TaskService:
             if migrated_task is not task:
                 self._tasks[task_id] = migrated_task
                 self._update_file_id_index(previous_task=task, current_task=migrated_task)
-                self._persist_tasks()
+                self._persist_tasks_unlocked()
                 return migrated_task
             return task
 
@@ -676,7 +686,16 @@ class TaskService:
             updated_task = task.model_copy(update=updates)
             self._tasks[task_id] = updated_task
             self._update_file_id_index(previous_task=task, current_task=updated_task)
-            self._persist_tasks()
+            if self._should_persist_update_immediately(
+                previous_task=task,
+                updated_task=updated_task,
+                status_value=status_value,
+                result=result,
+                error_message=error_message,
+            ):
+                self._persist_tasks_unlocked()
+            else:
+                self._mark_persist_dirty_unlocked()
             return updated_task
 
     def _load_tasks(self) -> dict[str, TaskRecord]:
@@ -717,31 +736,67 @@ class TaskService:
         index_path = settings.task_index_path
         try:
             index_path.parent.mkdir(parents=True, exist_ok=True)
-            payload = [
-                task.model_dump(mode="json")
-                for task in sorted(tasks.values(), key=lambda item: item.created_at, reverse=True)
-            ]
             index_path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
+                self._build_persist_payload(tasks),
                 encoding="utf-8",
             )
         except OSError:
             logger.exception("failed to persist migrated task index: %s", index_path)
 
-    def _persist_tasks(self) -> None:
+    def _persist_tasks_unlocked(self) -> None:
         index_path = settings.task_index_path
         try:
             index_path.parent.mkdir(parents=True, exist_ok=True)
-            payload = [
-                task.model_dump(mode="json")
-                for task in sorted(self._tasks.values(), key=lambda item: item.created_at, reverse=True)
-            ]
             index_path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
+                self._build_persist_payload(self._tasks),
                 encoding="utf-8",
             )
         except OSError:
             logger.exception("failed to persist task index: %s", index_path)
+
+    def _build_persist_payload(self, tasks: dict[str, TaskRecord]) -> str:
+        payload = [task.model_dump(mode="json") for task in tasks.values()]
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    def _mark_persist_dirty_unlocked(self) -> None:
+        self._persist_dirty = True
+        if self._persist_task is None or self._persist_task.done():
+            self._persist_task = asyncio.create_task(self._persist_loop())
+
+    async def _persist_loop(self) -> None:
+        try:
+            await asyncio.sleep(TASK_INDEX_PERSIST_DEBOUNCE_SECONDS)
+            async with self._lock:
+                if self._persist_dirty:
+                    self._persist_dirty = False
+                    self._persist_tasks_unlocked()
+                self._persist_task = None
+        except asyncio.CancelledError:
+            return
+
+    async def _flush_pending_persist(self) -> None:
+        async with self._lock:
+            if not self._persist_dirty:
+                return
+            self._persist_dirty = False
+            self._persist_tasks_unlocked()
+
+    def _should_persist_update_immediately(
+        self,
+        *,
+        previous_task: TaskRecord,
+        updated_task: TaskRecord,
+        status_value: TaskStatus,
+        result: TaskResult | None,
+        error_message: str | None,
+    ) -> bool:
+        if status_value in TERMINAL_TASK_STATUSES:
+            return True
+        if result is not None or error_message is not None:
+            return True
+        if previous_task.status != updated_task.status and status_value == TaskStatus.PARSING:
+            return True
+        return False
 
     def _build_file_id_index(self, tasks: dict[str, TaskRecord]) -> dict[str, str]:
         index: dict[str, str] = {}

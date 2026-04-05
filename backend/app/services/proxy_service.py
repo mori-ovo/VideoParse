@@ -446,13 +446,17 @@ class ProxyService:
 
     async def _consume_process_stderr(self, stream: asyncio.StreamReader) -> str:
         chunks: list[bytes] = []
+        total_size = 0
         while True:
             chunk = await stream.read(4096)
             if not chunk:
                 break
             chunks.append(chunk)
-            if sum(len(item) for item in chunks) > 32768:
-                chunks = [b"".join(chunks)[-32768:]]
+            total_size += len(chunk)
+            if total_size > 32768:
+                merged = b"".join(chunks)[-32768:]
+                chunks = [merged]
+                total_size = len(merged)
         return b"".join(chunks).decode("utf-8", errors="replace").strip()
 
     async def _close_failed_process(

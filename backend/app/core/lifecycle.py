@@ -32,4 +32,5 @@ async def lifespan(app: FastAPI):
     await media_access_log_service.stop()
     await cleanup_service.stop()
     await telegram_service.stop()
+    await task_service.stop()
     await proxy_service.stop()
