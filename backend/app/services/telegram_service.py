@@ -114,6 +114,7 @@ class TelegramProgressMessage:
     last_percent: int = -1
     last_text: str | None = None
     last_sent_at: float = 0.0
+    download_started_at: float | None = None
 
 
 class TelegramService:
@@ -462,6 +463,50 @@ class TelegramService:
             )
         return f"视频链接已生成：\n{link}"
 
+    def _short_display_name(self, file_name: str, *, limit: int = 48) -> str:
+        return file_name if len(file_name) <= limit else f"{file_name[: limit - 3]}..."
+
+    def _build_media_prepare_start_text(self, *, public_file: TelegramPublicFile) -> str:
+        lines = [
+            "正在解析 Telegram 视频...",
+            "阶段 1/3: 获取文件信息",
+            self._short_display_name(public_file.file_name),
+        ]
+        size_text = self._format_file_size_clean(public_file.file_size)
+        if size_text != "未知":
+            lines.append(f"文件大小：{size_text}")
+        lines.append("预计剩余：等待开始")
+        return "\n".join(lines)
+
+    def _build_file_info_wait_text(
+        self,
+        *,
+        file_name: str,
+        file_size: int | None,
+        elapsed_seconds: float,
+    ) -> str:
+        lines = [
+            "正在解析 Telegram 视频...",
+            "阶段 1/3: 获取文件信息",
+            self._short_display_name(file_name),
+        ]
+        size_text = self._format_file_size_clean(file_size)
+        if size_text != "未知":
+            lines.append(f"文件大小：{size_text}")
+        lines.append(f"已等待：{self._format_duration_compact(elapsed_seconds)}")
+        lines.append("预计剩余：等待 Telegram 响应")
+        return "\n".join(lines)
+
+    def _build_finalize_progress_text(self, *, file_name: str, step_text: str) -> str:
+        return "\n".join(
+            [
+                step_text,
+                "阶段 3/3: 生成解析链接",
+                self._short_display_name(file_name),
+                "预计剩余：几秒内",
+            ]
+        )
+
     async def _handle_url_message(
         self,
         *,
@@ -570,6 +615,68 @@ class TelegramService:
         status_text = status_text_map.get(task.status, "正在处理中...")
         return f"{status_text}\n{title_line}\n进度：{task.progress}%"
 
+    async def _prepare_public_file(
+        self,
+        *,
+        public_id: str,
+        progress_message: TelegramProgressMessage | None,
+    ) -> TelegramPublicFile | None:
+        last_error: Exception | None = None
+        for attempt in range(1, TELEGRAM_BACKGROUND_PREPARE_MAX_ATTEMPTS + 1):
+            public_file = await self.get_public_file(public_id)
+            if public_file is None:
+                return None
+
+            try:
+                cached_output = await self._get_cached_output_file(public_file)
+                if cached_output is not None:
+                    return public_file
+
+                resolved = await self._resolve_download_source(
+                    public_file=public_file,
+                    force_refresh=attempt > 1,
+                    progress_message=progress_message,
+                )
+                if resolved.local_path is not None:
+                    return public_file
+                if resolved.remote_url is None:
+                    raise TelegramServiceError("Telegram 文件当前无法获取可下载地址。")
+
+                await self._download_public_file_to_output(
+                    public_file=public_file,
+                    remote_url=resolved.remote_url,
+                    progress_message=progress_message,
+                )
+                return await self.get_public_file(public_id)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
+                logger.warning(
+                    "telegram prepare failed: public_id=%s attempt=%s/%s error=%s",
+                    public_id,
+                    attempt,
+                    TELEGRAM_BACKGROUND_PREPARE_MAX_ATTEMPTS,
+                    exc,
+                )
+                if attempt >= TELEGRAM_BACKGROUND_PREPARE_MAX_ATTEMPTS:
+                    break
+                if progress_message is not None:
+                    progress_message.last_percent = -1
+                    progress_message.download_started_at = None
+                    await self._update_progress_message(
+                        progress_message=progress_message,
+                        text=(
+                            "处理中断，正在重试...\n"
+                            f"{self._short_display_name(public_file.file_name)}\n"
+                            f"重试次数：{attempt}/{TELEGRAM_BACKGROUND_PREPARE_MAX_ATTEMPTS}"
+                        ),
+                        force=True,
+                    )
+                await asyncio.sleep(TELEGRAM_BACKGROUND_PREPARE_RETRY_SECONDS)
+
+        if last_error is not None:
+            raise last_error
+        return None
+
     def _schedule_background_prepare(
         self,
         *,
@@ -595,65 +702,22 @@ class TelegramService:
         public_id: str,
         progress_message: TelegramProgressMessage | None,
     ) -> None:
-        last_error: Exception | None = None
-        for attempt in range(1, TELEGRAM_BACKGROUND_PREPARE_MAX_ATTEMPTS + 1):
-            public_file = await self.get_public_file(public_id)
-            if public_file is None:
-                return
-
-            link = storage_service.build_stream_url(public_file.public_id, public_file.file_name)
-            try:
-                cached_output = await self._get_cached_output_file(public_file)
-                if cached_output is not None:
-                    await self._update_progress_message(
-                        progress_message=progress_message,
-                        text=self._build_completion_message(link=link, cached_locally=True),
-                        force=True,
-                    )
-                    return
-
-                resolved = await self._resolve_download_source(
-                    public_file=public_file,
-                    force_refresh=attempt > 1,
-                )
-                if resolved.local_path is not None:
-                    await self._update_progress_message(
-                        progress_message=progress_message,
-                        text=self._build_completion_message(link=link, cached_locally=True),
-                        force=True,
-                    )
-                    return
-                if resolved.remote_url is None:
-                    raise TelegramServiceError("Telegram 文件当前无法获取可下载地址。")
-
-                await self._download_public_file_to_output(
-                    public_file=public_file,
-                    remote_url=resolved.remote_url,
-                    progress_message=None,
-                )
-            except Exception as exc:  # noqa: BLE001
-                last_error = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
-                logger.warning(
-                    "telegram background prepare failed: public_id=%s attempt=%s/%s error=%s",
-                    public_id,
-                    attempt,
-                    TELEGRAM_BACKGROUND_PREPARE_MAX_ATTEMPTS,
-                    exc,
-                )
-                if attempt >= TELEGRAM_BACKGROUND_PREPARE_MAX_ATTEMPTS:
-                    break
-                await asyncio.sleep(TELEGRAM_BACKGROUND_PREPARE_RETRY_SECONDS)
-                continue
-
-            await self._update_progress_message(
+        try:
+            await self._prepare_public_file(
+                public_id=public_id,
                 progress_message=progress_message,
-                text=self._build_completion_message(link=link, cached_locally=True),
-                force=True,
             )
-            return
-
-        if last_error is not None:
-            logger.warning("telegram background caching gave up: public_id=%s error=%s", public_id, last_error)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("telegram background caching gave up: public_id=%s error=%s", public_id, exc)
+            if progress_message is not None:
+                error_text = "当前 Telegram 文件处理失败，请稍后重试。"
+                if self._is_timeout_error(exc):
+                    error_text = "当前 Telegram 文件获取超时，请稍后重试。"
+                await self._update_progress_message(
+                    progress_message=progress_message,
+                    text=error_text,
+                    force=True,
+                )
 
     async def _handle_media_update(
         self,
@@ -666,48 +730,46 @@ class TelegramService:
         if reply_to_message_id is None:
             raise TelegramServiceError("Telegram message is missing message_id.")
 
-        progress_message = await self._create_progress_message(
-            chat_id=chat_id,
-            reply_to_message_id=reply_to_message_id,
-            text="正在生成视频链接...",
-        )
         public_file = await self._register_media(
             media=media,
             chat_id=chat_id,
             message_id=reply_to_message_id,
         )
+        progress_message = await self._create_progress_message(
+            chat_id=chat_id,
+            reply_to_message_id=reply_to_message_id,
+            text=self._build_media_prepare_start_text(public_file=public_file),
+        )
+
+        try:
+            await self._prepare_public_file(
+                public_id=public_file.public_id,
+                progress_message=progress_message,
+            )
+        except Exception:
+            if progress_message is not None:
+                await self._safe_edit_message(
+                    chat_id=progress_message.chat_id,
+                    message_id=progress_message.message_id,
+                    text="处理失败，请稍后重试。",
+                )
+            raise
 
         link = storage_service.build_stream_url(public_file.public_id, public_file.file_name)
-        cached_locally = False
-        cached_output = await self._get_cached_output_file(public_file)
-        if cached_output is not None:
-            cached_locally = True
-        elif public_file.file_path:
-            cached_locally = self._resolve_accessible_local_path(public_file.file_path) is not None
-
-        completion_text = self._build_completion_message(
-            link=link,
-            cached_locally=cached_locally,
-            cache_pending=not cached_locally,
-        )
+        completion_text = self._build_completion_message(link=link, cached_locally=True)
         if progress_message is not None:
             await self._safe_edit_message(
                 chat_id=progress_message.chat_id,
                 message_id=progress_message.message_id,
                 text=completion_text,
             )
-        else:
-            await self._safe_send_message(
-                chat_id=chat_id,
-                text=completion_text,
-                reply_to_message_id=reply_to_message_id,
-            )
+            return
 
-        if not cached_locally:
-            self._schedule_background_prepare(
-                public_id=public_file.public_id,
-                progress_message=progress_message,
-            )
+        await self._safe_send_message(
+            chat_id=chat_id,
+            text=completion_text,
+            reply_to_message_id=reply_to_message_id,
+        )
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         message = self._extract_update_message(update)
@@ -938,9 +1000,7 @@ class TelegramService:
                     public_id=public_id,
                     telegram_file_id=media.telegram_file_id,
                     telegram_file_unique_id=media.telegram_file_unique_id,
-                    # 这里先不阻塞等待 getFile。
-                    # 对大视频来说，本地 Bot API 可能要很久才能返回 file_path。
-                    # 先生成短链并回复给用户，再在后台预热 file_path，首次访问时也会兜底刷新。
+                    # 先登记资源，后续在实际处理阶段再补 file_path / 本地缓存信息。
                     file_path=None,
                     cached_output_file_id=None,
                     file_name=media.file_name,
@@ -1016,10 +1076,14 @@ class TelegramService:
         *,
         public_file: TelegramPublicFile,
         force_refresh: bool,
+        progress_message: TelegramProgressMessage | None = None,
     ) -> TelegramResolvedTarget:
         file_path = public_file.file_path
         if force_refresh or not file_path:
-            file_path = await self._refresh_file_path(public_file)
+            file_path = await self._refresh_file_path_with_progress(
+                public_file=public_file,
+                progress_message=progress_message,
+            )
 
         if isinstance(file_path, str) and file_path:
             local_path = self._resolve_accessible_local_path(file_path)
@@ -1060,13 +1124,16 @@ class TelegramService:
 
         downloaded_bytes = 0
         total_bytes: int | None = None
+        if progress_message is not None:
+            progress_message.last_percent = -1
+            progress_message.download_started_at = None
         try:
             async with self._build_http_client(
                 read_timeout=max(settings.proxy_timeout_seconds, settings.telegram_file_timeout_seconds),
             ) as client:
                 async with client.stream("GET", remote_url) as response:
                     response.raise_for_status()
-                    total_bytes = self._parse_content_length(response.headers.get("content-length"))
+                    total_bytes = self._parse_content_length(response.headers.get("content-length")) or public_file.file_size
                     await self._update_download_progress_message(
                         progress_message=progress_message,
                         file_name=public_file.file_name,
@@ -1096,12 +1163,18 @@ class TelegramService:
         part_path.replace(final_path)
         await self._update_progress_message(
             progress_message=progress_message,
-            text="下载完成，正在生成本地短链...",
+            text=self._build_finalize_progress_text(
+                file_name=public_file.file_name,
+                step_text="下载完成，正在登记本地缓存...",
+            ),
             force=True,
         )
         await self._update_progress_message(
             progress_message=progress_message,
-            text="转存完成，正在生成站内短链...",
+            text=self._build_finalize_progress_text(
+                file_name=public_file.file_name,
+                step_text="转存完成，正在生成解析链接...",
+            ),
             force=True,
         )
         result = await storage_service.register_downloaded_file(final_path)
@@ -1150,6 +1223,27 @@ class TelegramService:
             return target_path
         return target_path / relative_path
 
+    async def _refresh_file_path_with_progress(
+        self,
+        *,
+        public_file: TelegramPublicFile,
+        progress_message: TelegramProgressMessage | None,
+    ) -> str | None:
+        if progress_message is None:
+            return await self._refresh_file_path(public_file)
+
+        wait_task = asyncio.create_task(
+            self._track_file_path_progress(
+                progress_message=progress_message,
+                public_file=public_file,
+            )
+        )
+        try:
+            return await self._refresh_file_path(public_file)
+        finally:
+            wait_task.cancel()
+            await asyncio.gather(wait_task, return_exceptions=True)
+
     async def _refresh_file_path(self, public_file: TelegramPublicFile) -> str | None:
         file_path = await self._get_file_path(public_file.telegram_file_id)
         async with self._lock:
@@ -1160,6 +1254,24 @@ class TelegramService:
             current.updated_at = datetime.now(timezone.utc)
             self._mark_index_dirty_unlocked()
             return current.file_path
+
+    async def _track_file_path_progress(
+        self,
+        *,
+        progress_message: TelegramProgressMessage,
+        public_file: TelegramPublicFile,
+    ) -> None:
+        started_at = monotonic()
+        while True:
+            await self._update_progress_message(
+                progress_message=progress_message,
+                text=self._build_file_info_wait_text(
+                    file_name=public_file.file_name,
+                    file_size=public_file.file_size,
+                    elapsed_seconds=monotonic() - started_at,
+                ),
+            )
+            await asyncio.sleep(TELEGRAM_PROGRESS_UPDATE_INTERVAL_SECONDS)
 
     async def _get_file_path(self, telegram_file_id: str) -> str | None:
         result = await self._call_api(
@@ -1500,6 +1612,8 @@ class TelegramService:
 
         percent = self._calculate_progress_percent(downloaded_bytes, total_bytes)
         now = monotonic()
+        if progress_message.download_started_at is None:
+            progress_message.download_started_at = now
         if not force:
             if percent >= 0 and progress_message.last_percent >= 0:
                 if percent - progress_message.last_percent < TELEGRAM_PROGRESS_UPDATE_MIN_STEP:
@@ -1509,6 +1623,16 @@ class TelegramService:
                 return
 
         progress_message.last_percent = percent
+        speed_bytes_per_second = self._estimate_download_speed(
+            downloaded_bytes=downloaded_bytes,
+            started_at=progress_message.download_started_at,
+            now=now,
+        )
+        eta_seconds = self._estimate_download_eta_seconds(
+            downloaded_bytes=downloaded_bytes,
+            total_bytes=total_bytes,
+            speed_bytes_per_second=speed_bytes_per_second,
+        )
         await self._update_progress_message(
             progress_message=progress_message,
             text=self._build_download_progress_text_clean(
@@ -1516,6 +1640,8 @@ class TelegramService:
                 downloaded_bytes=downloaded_bytes,
                 total_bytes=total_bytes,
                 percent=percent,
+                speed_bytes_per_second=speed_bytes_per_second,
+                eta_seconds=eta_seconds,
             ),
             force=True,
         )
@@ -1527,27 +1653,81 @@ class TelegramService:
         downloaded_bytes: int,
         total_bytes: int | None,
         percent: int,
+        speed_bytes_per_second: float | None,
+        eta_seconds: int | None,
     ) -> str:
-        display_name = file_name if len(file_name) <= 48 else f"{file_name[:45]}..."
+        display_name = self._short_display_name(file_name)
+        progress_lines = [
+            "正在转存 Telegram 视频到本地缓存...",
+            "阶段 2/3: 下载缓存",
+            display_name,
+        ]
         if percent >= 0:
             bar = self._build_progress_bar_ascii(percent)
-            return (
-                "正在转存 Telegram 视频到本地缓存...\n"
-                f"{display_name}\n"
-                f"[{bar}] {percent}%\n"
+            progress_lines.append(f"[{bar}] {percent}%")
+            progress_lines.append(
                 f"已下载 {self._format_file_size_clean(downloaded_bytes)} / {self._format_file_size_clean(total_bytes)}"
             )
-        return (
-            "正在转存 Telegram 视频到本地缓存...\n"
-            f"{display_name}\n"
-            f"已下载 {self._format_file_size_clean(downloaded_bytes)}"
-        )
+        else:
+            progress_lines.append(f"已下载 {self._format_file_size_clean(downloaded_bytes)}")
+
+        speed_text = self._format_speed_clean(speed_bytes_per_second)
+        progress_lines.append(f"当前速度：{speed_text or '计算中'}")
+        progress_lines.append(f"预计剩余：{self._format_duration_compact(eta_seconds) if eta_seconds is not None else '计算中'}")
+        return "\n".join(progress_lines)
 
     def _build_progress_bar_ascii(self, percent: int) -> str:
         normalized_percent = max(0, min(100, percent))
         total_blocks = 12
         filled_blocks = min(total_blocks, normalized_percent * total_blocks // 100)
         return "#" * filled_blocks + "-" * (total_blocks - filled_blocks)
+
+    def _estimate_download_speed(
+        self,
+        *,
+        downloaded_bytes: int,
+        started_at: float | None,
+        now: float,
+    ) -> float | None:
+        if started_at is None or downloaded_bytes <= 0:
+            return None
+        elapsed_seconds = now - started_at
+        if elapsed_seconds < 1:
+            return None
+        speed = downloaded_bytes / elapsed_seconds
+        return speed if speed > 0 else None
+
+    def _estimate_download_eta_seconds(
+        self,
+        *,
+        downloaded_bytes: int,
+        total_bytes: int | None,
+        speed_bytes_per_second: float | None,
+    ) -> int | None:
+        if not isinstance(total_bytes, int) or total_bytes <= 0:
+            return None
+        if speed_bytes_per_second is None or speed_bytes_per_second <= 0:
+            return None
+        if downloaded_bytes <= 0:
+            return None
+        remaining_bytes = max(0, total_bytes - downloaded_bytes)
+        return int((remaining_bytes / speed_bytes_per_second) + 0.999)
+
+    def _format_speed_clean(self, speed_bytes_per_second: float | None) -> str | None:
+        if not isinstance(speed_bytes_per_second, (int, float)) or speed_bytes_per_second <= 0:
+            return None
+        return f"{self._format_file_size_clean(int(speed_bytes_per_second))}/s"
+
+    def _format_duration_compact(self, seconds: float | int | None) -> str:
+        if not isinstance(seconds, (int, float)) or seconds < 0:
+            return "未知"
+
+        total_seconds = int(seconds + 0.5)
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        if hours > 0:
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+        return f"{minutes:02d}:{secs:02d}"
 
     def _format_file_size_clean(self, size: int | None) -> str:
         if not isinstance(size, int) or size < 0:
