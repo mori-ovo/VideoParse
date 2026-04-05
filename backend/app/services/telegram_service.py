@@ -848,7 +848,7 @@ class TelegramService:
             )
         except asyncio.CancelledError:
             return
-        except TimeoutError:
+        except asyncio.TimeoutError:
             return
 
     async def _get_updates(self, offset: int) -> list[dict[str, Any]]:

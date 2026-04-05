@@ -107,7 +107,7 @@ class MediaAccessLogService:
             while not self._stop_event.is_set():
                 try:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     pass
                 self._flush(force=False)
         except asyncio.CancelledError:

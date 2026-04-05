@@ -251,7 +251,7 @@ class ProxyService:
                 process.stdout.read(settings.proxy_chunk_size),
                 timeout=settings.lazy_stream_startup_timeout_seconds,
             )
-        except TimeoutError as exc:
+        except asyncio.TimeoutError as exc:
             await self._terminate_process(process)
             stderr_output = await stderr_task
             raise HTTPException(
@@ -479,7 +479,7 @@ class ProxyService:
         try:
             # 优先等待自然结束，只有超时才强制 kill，避免正常收尾被中断。
             await asyncio.wait_for(process.wait(), timeout=1)
-        except TimeoutError:
+        except asyncio.TimeoutError:
             process.kill()
             try:
                 await process.wait()

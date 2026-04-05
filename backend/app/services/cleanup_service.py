@@ -38,7 +38,7 @@ class CleanupService:
                     self._stop_event.wait(),
                     timeout=settings.cleanup_interval_seconds,
                 )
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 continue
 
     async def run_cleanup_cycle(self) -> dict[str, int]:
