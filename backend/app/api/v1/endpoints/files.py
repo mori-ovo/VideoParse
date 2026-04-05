@@ -1,7 +1,7 @@
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request, status
-from fastapi.responses import Response
+from fastapi.responses import RedirectResponse, Response
 
 from app.services.proxy_service import proxy_service
 from app.services.storage_service import storage_service
@@ -23,6 +23,10 @@ async def _build_task_proxy_file_response(
     task = await task_service.get_task_by_file_id(file_id)
     if task is None or task.result is None:
         return None
+
+    if not (task.result.video_url and task.result.audio_url):
+        target_url = await task_service.resolve_redirect_url(task.task_id, "single")
+        return RedirectResponse(url=target_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
     response = await proxy_service.build_proxy_response(
         task_id=task.task_id,

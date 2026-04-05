@@ -63,6 +63,10 @@ class ThirdPartyFallbackService:
         payload = self._fetch_iiilab_payload(url=url, site="youtube")
         return self._parse_iiilab_youtube_payload(payload, url)
 
+    def resolve_douyin_media(self, url: str) -> ThirdPartyMedia | None:
+        payload = self._fetch_iiilab_payload(url=url, site="douyin")
+        return self._parse_iiilab_generic_video_payload(payload, url, extractor="iiilab-douyin")
+
     def resolve_iwara_media(self, url: str) -> ThirdPartyMedia | None:
         video_id = self._extract_iwara_video_id(url)
         if video_id is None:
@@ -457,6 +461,15 @@ class ThirdPartyFallbackService:
         payload: dict[str, object],
         source_url: str,
     ) -> ThirdPartyMedia | None:
+        return self._parse_iiilab_generic_video_payload(payload, source_url, extractor="iiilab")
+
+    def _parse_iiilab_generic_video_payload(
+        self,
+        payload: dict[str, object],
+        source_url: str,
+        *,
+        extractor: str,
+    ) -> ThirdPartyMedia | None:
         medias = payload.get("medias")
         if not isinstance(medias, list):
             return None
@@ -489,7 +502,7 @@ class ThirdPartyFallbackService:
             uploader=None,
             duration=None,
             thumbnail=thumbnail if isinstance(thumbnail, str) and thumbnail.strip() else None,
-            extractor="iiilab",
+            extractor=extractor,
             direct_url=direct_url,
             direct_ext="mp4",
         )

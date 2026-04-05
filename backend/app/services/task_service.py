@@ -8,6 +8,7 @@ import string
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
 from fastapi import HTTPException, status
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 PLATFORM_PATTERNS: tuple[tuple[Platform, re.Pattern[str]], ...] = (
     (Platform.BILIBILI, re.compile(r"(bilibili\.com|b23\.tv)", re.IGNORECASE)),
-    (Platform.DOUYIN, re.compile(r"(douyin\.com|iesdouyin\.com)", re.IGNORECASE)),
+    (Platform.DOUYIN, re.compile(r"(douyin\.com|iesdouyin\.com|v\.douyin\.com)", re.IGNORECASE)),
     (Platform.TWITTER, re.compile(r"(twitter\.com|x\.com)", re.IGNORECASE)),
     (Platform.YOUTUBE, re.compile(r"(youtube\.com|youtu\.be)", re.IGNORECASE)),
     (Platform.REDDIT, re.compile(r"(reddit\.com|redd\.it)", re.IGNORECASE)),
@@ -74,7 +75,7 @@ class TaskService:
                 self._persist_tasks()
 
     async def create_task(self, payload: ParseRequest) -> TaskRecord:
-        source_url = str(payload.url)
+        source_url = self.normalize_source_url(str(payload.url))
         platform = self.detect_platform(source_url)
         task_id = uuid4().hex
         now = datetime.now(timezone.utc)
@@ -98,6 +99,41 @@ class TaskService:
             self._tasks[task_id] = task
             self._persist_tasks()
         return task
+
+    def normalize_source_url(self, source_url: str) -> str:
+        parsed = urlparse(source_url)
+        host = parsed.netloc.lower()
+        path = parsed.path.rstrip("/")
+
+        if host in {"www.douyin.com", "douyin.com"}:
+            note_match = re.fullmatch(r"/note/(?P<item_id>\d+)", path)
+            if note_match is not None:
+                return urlunparse(
+                    (
+                        parsed.scheme or "https",
+                        "www.douyin.com",
+                        f"/video/{note_match.group('item_id')}",
+                        "",
+                        "",
+                        "",
+                    )
+                )
+
+        if host in {"iesdouyin.com", "www.iesdouyin.com"}:
+            share_match = re.fullmatch(r"/share/(?P<kind>note|video)/(?P<item_id>\d+)", path)
+            if share_match is not None:
+                return urlunparse(
+                    (
+                        parsed.scheme or "https",
+                        "www.douyin.com",
+                        f"/video/{share_match.group('item_id')}",
+                        "",
+                        "",
+                        "",
+                    )
+                )
+
+        return source_url
 
     async def get_task(self, task_id: str) -> TaskRecord | None:
         async with self._lock:
@@ -168,6 +204,12 @@ class TaskService:
                     metadata=metadata,
                     platform=task.platform,
                 )
+                result = self._promote_proxy_task_result(
+                    result=result,
+                    title=metadata.title,
+                    extension=metadata.direct_ext,
+                    expires_note="已生成本站短链。播放时会优先复用源站单文件直链，失效后再按需刷新。",
+                )
                 await self._update_task(
                     task_id=task_id,
                     status_value=TaskStatus.SUCCESS,
@@ -183,6 +225,12 @@ class TaskService:
                     metadata=metadata,
                     platform=task.platform,
                 )
+                result = self._promote_proxy_task_result(
+                    result=result,
+                    title=metadata.title,
+                    extension=metadata.direct_ext,
+                    expires_note="已生成本站短链。播放时会优先复用源站单文件直链，失效后再按需刷新。",
+                )
                 await self._update_task(
                     task_id=task_id,
                     status_value=TaskStatus.SUCCESS,
@@ -197,6 +245,12 @@ class TaskService:
                     task_id=task_id,
                     metadata=metadata,
                     platform=task.platform,
+                )
+                result = self._promote_proxy_task_result(
+                    result=result,
+                    title=metadata.title,
+                    extension=metadata.direct_ext,
+                    expires_note="已生成本站短链。播放时会优先复用源站单文件直链，失效后再按需刷新。",
                 )
                 await self._update_task(
                     task_id=task_id,
@@ -217,6 +271,12 @@ class TaskService:
                     task_id=task_id,
                     metadata=metadata,
                     platform=task.platform,
+                )
+                result = self._promote_proxy_task_result(
+                    result=result,
+                    title=metadata.title,
+                    extension=settings.merge_output_format,
+                    expires_note="长视频已生成本站短链。首次播放时会按需实时合流。",
                 )
                 await self._update_task(
                     task_id=task_id,
@@ -453,6 +513,34 @@ class TaskService:
             audio_proxy_url=audio_proxy_url,
             created_at=created_at,
             expires_note=expires_note,
+        )
+
+    def _promote_proxy_task_result(
+        self,
+        *,
+        result: TaskResult,
+        title: str,
+        extension: str | None,
+        expires_note: str,
+    ) -> TaskResult:
+        if result.result_type != ResultType.DIRECT:
+            return result
+        if result.file_id or not result.redirect_url:
+            return result
+
+        return self._build_task_proxy_file_result(
+            title=title,
+            extension=extension,
+            created_at=result.created_at,
+            redirect_url=result.redirect_url,
+            proxy_url=result.proxy_url or result.redirect_url,
+            expires_note=expires_note,
+            video_url=result.video_url,
+            video_redirect_url=result.video_redirect_url,
+            video_proxy_url=result.video_proxy_url,
+            audio_url=result.audio_url,
+            audio_redirect_url=result.audio_redirect_url,
+            audio_proxy_url=result.audio_proxy_url,
         )
 
     def _migrate_iwara_short_file_result(self, task: TaskRecord, result: TaskResult) -> TaskResult:

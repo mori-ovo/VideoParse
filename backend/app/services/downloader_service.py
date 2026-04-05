@@ -617,6 +617,8 @@ class DownloaderService:
                 media = third_party_fallback_service.resolve_twitter_media(url)
             elif platform == Platform.YOUTUBE:
                 media = third_party_fallback_service.resolve_youtube_media(url)
+            elif platform == Platform.DOUYIN:
+                media = third_party_fallback_service.resolve_douyin_media(url)
             elif platform == Platform.IWARA:
                 media = third_party_fallback_service.resolve_iwara_media(url)
             else:
@@ -830,7 +832,7 @@ class DownloaderService:
         host = urlparse(url).netloc.lower()
         if "bilibili.com" in host or "b23.tv" in host:
             return Platform.BILIBILI
-        if "douyin.com" in host or "iesdouyin.com" in host:
+        if "douyin.com" in host or "iesdouyin.com" in host or "v.douyin.com" in host:
             return Platform.DOUYIN
         if "twitter.com" in host or "x.com" in host:
             return Platform.TWITTER

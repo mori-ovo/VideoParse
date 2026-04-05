@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import mimetypes
+import re
 import secrets
 import string
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -18,7 +19,10 @@ from fastapi.responses import Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from app.core.config import settings
+from app.schemas.parse import ParseRequest
+from app.schemas.task import DeliveryMode, TaskRecord, TaskStatus
 from app.services.storage_service import StoredFile, storage_service
+from app.services.task_service import task_service
 from app.utils.local_file_response import build_local_file_response
 from app.utils.path import build_public_file_name
 
@@ -41,6 +45,10 @@ TELEGRAM_PROGRESS_UPDATE_INTERVAL_SECONDS = 1.5
 TELEGRAM_PROGRESS_UPDATE_MIN_STEP = 3
 TELEGRAM_BACKGROUND_PREPARE_MAX_ATTEMPTS = 5
 TELEGRAM_BACKGROUND_PREPARE_RETRY_SECONDS = 15
+TELEGRAM_TASK_POLL_INTERVAL_SECONDS = 1.5
+TELEGRAM_TASK_POLL_TIMEOUT_SECONDS = 900
+
+URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
 
 VIDEO_DOCUMENT_EXTENSIONS = {
     ".3gp",
@@ -485,6 +493,114 @@ class TelegramService:
             return f"视频直链已生成：\n{link}\n\n资源已就绪，可直接播放。"
         return f"视频直链已生成：\n{link}"
 
+    async def _handle_url_message(
+        self,
+        *,
+        message: dict[str, Any],
+        chat_id: int,
+        source_url: str,
+    ) -> None:
+        reply_to_message_id = self._extract_message_id(message)
+        if reply_to_message_id is None:
+            raise TelegramServiceError("Telegram message is missing message_id.")
+
+        progress_message = await self._create_progress_message(
+            chat_id=chat_id,
+            reply_to_message_id=reply_to_message_id,
+            text="正在创建解析任务...",
+        )
+
+        try:
+            payload = ParseRequest(
+                url=source_url,
+                delivery_mode=DeliveryMode.AUTO,
+            )
+            task = await task_service.create_task(payload)
+            asyncio.create_task(task_service.run_download_pipeline(task.task_id))
+            link = await self._wait_for_task_link(task_id=task.task_id, progress_message=progress_message)
+        except Exception:
+            if progress_message is not None:
+                await self._safe_edit_message(
+                    chat_id=progress_message.chat_id,
+                    message_id=progress_message.message_id,
+                    text="链接解析失败，请稍后重试。",
+                )
+            raise
+
+        completion_text = self._build_completion_message(link=link, cached_locally=False)
+        if progress_message is not None:
+            await self._safe_edit_message(
+                chat_id=progress_message.chat_id,
+                message_id=progress_message.message_id,
+                text=completion_text,
+            )
+        else:
+            await self._safe_send_message(
+                chat_id=chat_id,
+                text=completion_text,
+                reply_to_message_id=reply_to_message_id,
+            )
+
+    async def _wait_for_task_link(
+        self,
+        *,
+        task_id: str,
+        progress_message: TelegramProgressMessage | None,
+    ) -> str:
+        deadline = monotonic() + TELEGRAM_TASK_POLL_TIMEOUT_SECONDS
+        while monotonic() < deadline:
+            task = await task_service.get_task(task_id)
+            if task is None:
+                raise TelegramServiceError("解析任务不存在。")
+
+            if task.status == TaskStatus.SUCCESS:
+                link = self._pick_task_link(task)
+                if link is None:
+                    raise TelegramServiceError("任务已完成，但没有拿到可用链接。")
+                return link
+
+            if task.status == TaskStatus.FAILED:
+                raise TelegramServiceError(task.error_message or task.message or "解析任务失败。")
+
+            await self._update_progress_message(
+                progress_message=progress_message,
+                text=self._build_task_progress_text(task),
+            )
+            await asyncio.sleep(TELEGRAM_TASK_POLL_INTERVAL_SECONDS)
+
+        raise TelegramServiceError("解析任务超时，请稍后重试。")
+
+    def _pick_task_link(self, task: TaskRecord) -> str | None:
+        result = task.result
+        if result is None:
+            return None
+
+        for candidate in (
+            result.play_url,
+            result.download_url,
+            result.proxy_url,
+            result.redirect_url,
+            result.direct_url,
+            result.video_proxy_url,
+            result.video_redirect_url,
+        ):
+            if isinstance(candidate, str) and candidate:
+                return candidate
+        return None
+
+    def _build_task_progress_text(self, task: TaskRecord) -> str:
+        title = task.title.strip() if isinstance(task.title, str) and task.title.strip() else "当前链接"
+        title_line = title if len(title) <= 40 else f"{title[:37]}..."
+        status_text_map = {
+            TaskStatus.PENDING: "任务已创建，等待开始。",
+            TaskStatus.PARSING: "正在解析视频信息...",
+            TaskStatus.DOWNLOADING: "正在下载媒体资源...",
+            TaskStatus.MERGING: "正在处理音视频流...",
+            TaskStatus.UPLOADING: "正在生成本站短链...",
+        }
+        status_text = status_text_map.get(task.status, "正在处理中...")
+        return f"{status_text}\n{title_line}\n进度：{task.progress}%"
+
     def _schedule_background_prepare(
         self,
         *,
@@ -594,6 +710,15 @@ class TelegramService:
                 message=message,
                 chat_id=chat_id,
                 media=media,
+            )
+            return
+
+        supported_url = self._extract_supported_url(message)
+        if supported_url is not None:
+            await self._handle_url_message(
+                message=message,
+                chat_id=chat_id,
+                source_url=supported_url,
             )
             return
 
@@ -1618,6 +1743,39 @@ class TelegramService:
         if isinstance(document, dict) and self._is_supported_video_document(document):
             return self._build_incoming_media(document)
         return None
+
+    def _extract_supported_url(self, message: dict[str, Any]) -> str | None:
+        text = self._extract_message_text(message)
+        if not isinstance(text, str) or not text.strip():
+            return None
+
+        for match in URL_PATTERN.findall(text):
+            candidate = self._strip_url_punctuation(match)
+            if not candidate:
+                continue
+            try:
+                normalized = task_service.normalize_source_url(candidate)
+                task_service.detect_platform(normalized)
+            except HTTPException:
+                continue
+            return normalized
+        return None
+
+    def _contains_url_text(self, message: dict[str, Any]) -> bool:
+        text = self._extract_message_text(message)
+        if not isinstance(text, str):
+            return False
+        return bool(URL_PATTERN.search(text))
+
+    def _extract_message_text(self, message: dict[str, Any]) -> str | None:
+        for key in ("text", "caption"):
+            value = message.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        return None
+
+    def _strip_url_punctuation(self, value: str) -> str:
+        return value.strip().rstrip(").,!?]>}\"'")
 
     def _contains_media_payload(self, message: dict[str, Any]) -> bool:
         # Telegram 里很多“看起来像视频”的资源，实际会以 animation 或 video_note 下发。
