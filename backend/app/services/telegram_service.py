@@ -49,6 +49,7 @@ TELEGRAM_TASK_POLL_INTERVAL_SECONDS = 1.5
 TELEGRAM_TASK_POLL_TIMEOUT_SECONDS = 900
 
 URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
+PURE_BILIBILI_BV_PATTERN = re.compile(r"\b(BV[0-9A-Za-z]{10})\b", re.IGNORECASE)
 
 VIDEO_DOCUMENT_EXTENSIONS = {
     ".3gp",
@@ -699,7 +700,7 @@ class TelegramService:
         if isinstance(text, str) and text.strip().lower() in {"/start", "/help"}:
             await self._safe_send_message(
                 chat_id=chat_id,
-                text="把 Telegram 视频或 video/* 文件直接发送给我，我会返回本站短链。",
+                text="把 Telegram 视频、可直接打开的视频链接，或纯 BV 号直接发给我，我会返回本站短链。",
                 reply_to_message_id=self._extract_message_id(message),
             )
             return
@@ -1751,6 +1752,18 @@ class TelegramService:
 
         for match in URL_PATTERN.findall(text):
             candidate = self._strip_url_punctuation(match)
+            if not candidate:
+                continue
+            try:
+                normalized = task_service.normalize_source_url(candidate)
+                task_service.detect_platform(normalized)
+            except HTTPException:
+                continue
+            return normalized
+
+        # 纯 BV 号没有协议头，单独补一层文本识别。
+        for match in PURE_BILIBILI_BV_PATTERN.findall(text):
+            candidate = match.strip()
             if not candidate:
                 continue
             try:
