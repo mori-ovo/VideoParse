@@ -239,6 +239,23 @@ class Settings(BaseSettings):
     # 单链接合流代理允许 ffmpeg 预热的最长等待时间。
     lazy_stream_startup_timeout_seconds: int = 20
 
+    # 聚合重复的媒体访问日志，减少播放器分段请求导致的日志刷屏。
+    media_access_log_aggregation_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "MEDIA_ACCESS_LOG_AGGREGATION_ENABLED",
+            "FILE_ACCESS_LOG_AGGREGATION_ENABLED",
+        ),
+    )
+    # 聚合窗口内的相同请求只输出一条摘要日志。
+    media_access_log_window_seconds: int = Field(
+        default=5,
+        validation_alias=AliasChoices(
+            "MEDIA_ACCESS_LOG_WINDOW_SECONDS",
+            "FILE_ACCESS_LOG_WINDOW_SECONDS",
+        ),
+    )
+
     temp_dir: Path = Field(default_factory=lambda: PROJECT_ROOT / "temp")
     cache_dir: Path = Field(default_factory=lambda: PROJECT_ROOT / "cache")
     output_dir: Path = Field(default_factory=lambda: PROJECT_ROOT / "output")
