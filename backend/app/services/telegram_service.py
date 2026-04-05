@@ -45,6 +45,8 @@ TELEGRAM_PROGRESS_UPDATE_INTERVAL_SECONDS = 1.5
 TELEGRAM_PROGRESS_UPDATE_MIN_STEP = 3
 TELEGRAM_BACKGROUND_PREPARE_MAX_ATTEMPTS = 5
 TELEGRAM_BACKGROUND_PREPARE_RETRY_SECONDS = 15
+TELEGRAM_FILE_INFO_ESTIMATE_BASE_SECONDS = 6.0
+TELEGRAM_FILE_INFO_DEFAULT_MB_PER_SECOND = 8.0
 TELEGRAM_INLINE_PREPARE_MIN_WAIT_SECONDS = 30.0
 TELEGRAM_INLINE_PREPARE_POLL_INTERVAL_SECONDS = 0.25
 TELEGRAM_TASK_POLL_INTERVAL_SECONDS = 1.5
@@ -139,6 +141,7 @@ class TelegramService:
         self._index_persist_task: asyncio.Task[None] | None = None
         self._state_dirty = False
         self._state_persist_task: asyncio.Task[None] | None = None
+        self._file_info_seconds_per_mb = 1.0 / TELEGRAM_FILE_INFO_DEFAULT_MB_PER_SECOND
 
     async def start(self) -> None:
         if self._poll_client is None:
@@ -475,7 +478,7 @@ class TelegramService:
         size_text = self._format_file_size_clean(public_file.file_size)
         if size_text != "未知":
             lines.append(f"文件大小：{size_text}")
-        lines.append("预计剩余：等待开始")
+        lines.append(self._build_file_info_eta_line(file_size=public_file.file_size, elapsed_seconds=0.0))
         return "\n".join(lines)
 
     def _build_file_info_wait_text(
@@ -494,8 +497,56 @@ class TelegramService:
         if size_text != "未知":
             lines.append(f"文件大小：{size_text}")
         lines.append(f"已等待：{self._format_duration_compact(elapsed_seconds)}")
-        lines.append("预计剩余：等待 Telegram 响应")
+        lines.append(self._build_file_info_eta_line(file_size=file_size, elapsed_seconds=elapsed_seconds))
         return "\n".join(lines)
+
+    def _build_file_info_eta_line(self, *, file_size: int | None, elapsed_seconds: float) -> str:
+        eta_seconds, from_estimate = self._estimate_file_info_remaining_seconds(
+            file_size=file_size,
+            elapsed_seconds=elapsed_seconds,
+        )
+        eta_text = self._format_duration_compact(eta_seconds)
+        if from_estimate:
+            return f"预计剩余：约 {eta_text}"
+        return f"预计剩余：{eta_text} 内（按超时上限）"
+
+    def _estimate_file_info_remaining_seconds(
+        self,
+        *,
+        file_size: int | None,
+        elapsed_seconds: float,
+    ) -> tuple[int, bool]:
+        timeout_remaining = max(1, int(settings.telegram_file_timeout_seconds - elapsed_seconds + 0.999))
+        estimated_total = self._estimate_file_info_total_seconds(file_size=file_size)
+        if estimated_total is None:
+            return timeout_remaining, False
+
+        estimated_remaining = int(estimated_total - elapsed_seconds + 0.999)
+        if estimated_remaining > 0:
+            return estimated_remaining, True
+        return timeout_remaining, False
+
+    def _estimate_file_info_total_seconds(self, *, file_size: int | None) -> int | None:
+        if not isinstance(file_size, int) or file_size <= 0:
+            return None
+
+        size_mb = max(1.0, file_size / (1024 * 1024))
+        estimated_seconds = TELEGRAM_FILE_INFO_ESTIMATE_BASE_SECONDS + (size_mb * self._file_info_seconds_per_mb)
+        bounded_seconds = min(float(settings.telegram_file_timeout_seconds), estimated_seconds)
+        return max(1, int(bounded_seconds + 0.999))
+
+    def _record_file_info_duration(self, *, file_size: int | None, elapsed_seconds: float) -> None:
+        if not isinstance(file_size, int) or file_size <= 0 or elapsed_seconds <= 0:
+            return
+
+        size_mb = max(1.0, file_size / (1024 * 1024))
+        observed_seconds_per_mb = elapsed_seconds / size_mb
+        clamped_seconds_per_mb = min(10.0, max(0.01, observed_seconds_per_mb))
+        alpha = 0.25
+        self._file_info_seconds_per_mb = (
+            (1.0 - alpha) * self._file_info_seconds_per_mb
+            + alpha * clamped_seconds_per_mb
+        )
 
     def _build_finalize_progress_text(self, *, file_name: str, step_text: str) -> str:
         return "\n".join(
@@ -1232,14 +1283,21 @@ class TelegramService:
         if progress_message is None:
             return await self._refresh_file_path(public_file)
 
+        started_at = monotonic()
         wait_task = asyncio.create_task(
             self._track_file_path_progress(
                 progress_message=progress_message,
                 public_file=public_file,
+                started_at=started_at,
             )
         )
         try:
-            return await self._refresh_file_path(public_file)
+            file_path = await self._refresh_file_path(public_file)
+            self._record_file_info_duration(
+                file_size=public_file.file_size,
+                elapsed_seconds=monotonic() - started_at,
+            )
+            return file_path
         finally:
             wait_task.cancel()
             await asyncio.gather(wait_task, return_exceptions=True)
@@ -1260,8 +1318,8 @@ class TelegramService:
         *,
         progress_message: TelegramProgressMessage,
         public_file: TelegramPublicFile,
+        started_at: float,
     ) -> None:
-        started_at = monotonic()
         while True:
             await self._update_progress_message(
                 progress_message=progress_message,
