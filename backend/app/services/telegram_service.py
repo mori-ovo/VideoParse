@@ -45,6 +45,8 @@ TELEGRAM_PROGRESS_UPDATE_INTERVAL_SECONDS = 1.5
 TELEGRAM_PROGRESS_UPDATE_MIN_STEP = 3
 TELEGRAM_BACKGROUND_PREPARE_MAX_ATTEMPTS = 5
 TELEGRAM_BACKGROUND_PREPARE_RETRY_SECONDS = 15
+TELEGRAM_INLINE_PREPARE_MIN_WAIT_SECONDS = 30.0
+TELEGRAM_INLINE_PREPARE_POLL_INTERVAL_SECONDS = 0.25
 TELEGRAM_TASK_POLL_INTERVAL_SECONDS = 1.5
 TELEGRAM_TASK_POLL_TIMEOUT_SECONDS = 900
 TELEGRAM_INDEX_PERSIST_DEBOUNCE_SECONDS = 1.0
@@ -245,13 +247,27 @@ class TelegramService:
         if public_file is None:
             return None
 
-        cached_output = await self._get_cached_output_file(public_file)
-        if cached_output is not None:
-            return build_local_file_response(
-                path=cached_output.path,
-                media_type=cached_output.content_type,
-                file_name=cached_output.file_name,
-                as_attachment=as_attachment,
+        ready_response = await self._build_ready_public_file_response(
+            public_file=public_file,
+            as_attachment=as_attachment,
+        )
+        if ready_response is not None:
+            return ready_response
+
+        if not as_attachment:
+            self._schedule_background_prepare(
+                public_id=public_file.public_id,
+                progress_message=None,
+            )
+            waited_response = await self._wait_for_ready_public_file_response(
+                public_id=public_file.public_id,
+                as_attachment=False,
+                timeout_seconds=max(TELEGRAM_INLINE_PREPARE_MIN_WAIT_SECONDS, settings.telegram_file_timeout_seconds),
+            )
+            if waited_response is not None:
+                return waited_response
+            return self._build_prepare_timeout_response(
+                request=request,
             )
 
         resolved = await self._resolve_target(public_file=public_file, force_refresh=False)
@@ -269,9 +285,7 @@ class TelegramService:
                 detail="Telegram 文件路径不可用，无法生成视频直链。",
             )
 
-        client = self._require_stream_client()
         upstream_response = await self._open_remote_stream(
-            client=client,
             remote_url=resolved.remote_url,
             request=request,
         )
@@ -288,7 +302,6 @@ class TelegramService:
                     detail="Telegram 文件已失效，且刷新后仍无法恢复。",
                 )
             upstream_response = await self._open_remote_stream(
-                client=client,
                 remote_url=refreshed_target.remote_url,
                 request=request,
             )
@@ -319,6 +332,77 @@ class TelegramService:
             status_code=upstream_response.status_code,
             headers=filtered_headers,
             background=BackgroundTask(upstream_response.aclose),
+        )
+
+    async def _build_ready_public_file_response(
+        self,
+        *,
+        public_file: TelegramPublicFile,
+        as_attachment: bool,
+    ) -> Response | None:
+        cached_output = await self._get_cached_output_file(public_file)
+        if cached_output is not None:
+            return build_local_file_response(
+                path=cached_output.path,
+                media_type=cached_output.content_type,
+                file_name=cached_output.file_name,
+                as_attachment=as_attachment,
+            )
+
+        file_path = public_file.file_path
+        if isinstance(file_path, str) and file_path:
+            local_path = self._resolve_accessible_local_path(file_path)
+            if local_path is not None:
+                return build_local_file_response(
+                    path=local_path,
+                    media_type=public_file.content_type,
+                    file_name=public_file.file_name,
+                    as_attachment=as_attachment,
+                )
+
+        return None
+
+    async def _wait_for_ready_public_file_response(
+        self,
+        *,
+        public_id: str,
+        as_attachment: bool,
+        timeout_seconds: float,
+    ) -> Response | None:
+        deadline = monotonic() + max(0.0, timeout_seconds)
+        while monotonic() < deadline:
+            public_file = await self.get_public_file(public_id)
+            if public_file is None:
+                return None
+
+            ready_response = await self._build_ready_public_file_response(
+                public_file=public_file,
+                as_attachment=as_attachment,
+            )
+            if ready_response is not None:
+                return ready_response
+
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(TELEGRAM_INLINE_PREPARE_POLL_INTERVAL_SECONDS, remaining))
+
+        return None
+
+    def _build_prepare_timeout_response(self, *, request: Request) -> Response:
+        headers = {
+            "Cache-Control": "no-store, max-age=0",
+            "Retry-After": "5",
+            "X-VideoParse-Prepare-State": "timeout",
+        }
+        if request.method == "HEAD":
+            return Response(content=b"", status_code=status.HTTP_504_GATEWAY_TIMEOUT, headers=headers)
+
+        return Response(
+            content="视频准备超时，请稍后重试。",
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            headers=headers,
+            media_type="text/plain",
         )
 
     async def get_public_file(self, file_id: str) -> TelegramPublicFile | None:
@@ -361,129 +445,6 @@ class TelegramService:
             self._write_index_unlocked()
             return len(expired_ids)
 
-    async def get_link_by_message(self, message: dict[str, Any]) -> tuple[str, str] | None:
-        media = self._extract_supported_media(message)
-        if media is None:
-            return None
-
-        chat_id = self._extract_chat_id(message)
-        message_id = self._extract_message_id(message)
-        if chat_id is None or message_id is None:
-            raise TelegramServiceError("Telegram 消息缺少 chat_id 或 message_id。")
-
-        public_file = await self._register_media(
-            media=media,
-            chat_id=chat_id,
-            message_id=message_id,
-        )
-        link = storage_service.build_stream_url(public_file.public_id, public_file.file_name)
-        return link, public_file.public_id
-
-    async def _prepare_public_file_link(
-        self,
-        *,
-        public_file: TelegramPublicFile,
-        progress_message: TelegramProgressMessage | None,
-    ) -> tuple[str, bool]:
-        link = storage_service.build_stream_url(public_file.public_id, public_file.file_name)
-        cached_output = await self._get_cached_output_file(public_file)
-        if cached_output is not None:
-            return link, True
-
-        resolved = await self._resolve_download_source(public_file=public_file, force_refresh=False)
-        if resolved.local_path is not None:
-            return link, True
-        if resolved.remote_url is None:
-            raise TelegramServiceError("Telegram 文件当前无法获取可下载地址。")
-
-        return link, False
-
-    async def _handle_media_update(
-        self,
-        *,
-        message: dict[str, Any],
-        chat_id: int,
-        media: TelegramIncomingMedia,
-    ) -> None:
-        reply_to_message_id = self._extract_message_id(message)
-        if reply_to_message_id is None:
-            raise TelegramServiceError("Telegram message is missing message_id.")
-
-        progress_message = await self._create_progress_message(
-            chat_id=chat_id,
-            reply_to_message_id=reply_to_message_id,
-            text="正在检查视频文件...",
-        )
-        public_file = await self._register_media(
-            media=media,
-            chat_id=chat_id,
-            message_id=reply_to_message_id,
-        )
-
-        try:
-            link, cached_locally = await self._prepare_public_file_link(
-                public_file=public_file,
-                progress_message=progress_message,
-            )
-        except Exception:
-            if progress_message is not None:
-                await self._safe_edit_message(
-                    chat_id=progress_message.chat_id,
-                    message_id=progress_message.message_id,
-                    text="处理失败，请稍后重试。",
-                )
-            raise
-
-        completion_text = self._build_completion_message(
-            link=link,
-            cached_locally=cached_locally,
-            cache_pending=not cached_locally,
-        )
-        if progress_message is not None:
-            await self._safe_edit_message(
-                chat_id=progress_message.chat_id,
-                message_id=progress_message.message_id,
-                text=completion_text,
-            )
-        else:
-            await self._safe_send_message(
-                chat_id=chat_id,
-                text=completion_text,
-                reply_to_message_id=reply_to_message_id,
-            )
-
-        if not cached_locally:
-            self._schedule_background_prepare(
-                public_id=public_file.public_id,
-                progress_message=progress_message,
-            )
-
-    def _should_process_media_in_background(self, public_file: TelegramPublicFile) -> bool:
-        threshold_mb = max(0, settings.telegram_sync_cache_max_mb)
-        threshold_bytes = threshold_mb * 1024 * 1024
-        if threshold_bytes <= 0:
-            return True
-
-        file_size = public_file.file_size
-        if not isinstance(file_size, int) or file_size <= 0:
-            return True
-        return file_size > threshold_bytes
-
-    def _build_background_prepare_text(self, *, public_file: TelegramPublicFile) -> str:
-        size_text = self._format_file_size_clean(public_file.file_size)
-        if size_text == "未知":
-            return "文件较大，已切换为后台处理。\n处理完成后会在这条消息里更新直链。"
-        return (
-            "文件较大，已切换为后台处理。\n"
-            f"文件大小：{size_text}\n"
-            "处理完成后会在这条消息里更新直链。"
-        )
-
-    def _build_completion_message(self, *, link: str, cached_locally: bool) -> str:
-        if cached_locally:
-            return f"视频直链已生成：\n{link}\n\n资源已就绪，可直接播放。"
-        return f"视频直链已生成：\n{link}"
-
     def _build_completion_message(
         self,
         *,
@@ -494,7 +455,11 @@ class TelegramService:
         if cached_locally:
             return f"视频链接已生成：\n{link}\n\n资源已就绪，可直接播放。"
         if cache_pending:
-            return f"视频链接已生成：\n{link}\n\n首次访问会走流式代理，后台会继续缓存。"
+            return (
+                f"视频链接已生成：\n{link}\n\n"
+                "后台正在准备可稳定播放的文件。\n"
+                "首次播放会等待缓存就绪，完成后同一个链接即可直接播放。"
+            )
         return f"视频链接已生成：\n{link}"
 
     async def _handle_url_message(
@@ -623,62 +588,6 @@ class TelegramService:
         )
         self._background_prepare_tasks[public_id] = task
         task.add_done_callback(lambda _task, key=public_id: self._background_prepare_tasks.pop(key, None))
-
-    async def _prepare_public_file_in_background(
-        self,
-        *,
-        public_id: str,
-        progress_message: TelegramProgressMessage | None,
-    ) -> None:
-        last_error: Exception | None = None
-        for attempt in range(1, TELEGRAM_BACKGROUND_PREPARE_MAX_ATTEMPTS + 1):
-            public_file = await self.get_public_file(public_id)
-            if public_file is None:
-                return
-
-            try:
-                link, _ = await self._prepare_public_file_link(
-                    public_file=public_file,
-                    progress_message=progress_message,
-                )
-            except Exception as exc:  # noqa: BLE001
-                last_error = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
-                logger.warning(
-                    "telegram background prepare failed: public_id=%s attempt=%s/%s error=%s",
-                    public_id,
-                    attempt,
-                    TELEGRAM_BACKGROUND_PREPARE_MAX_ATTEMPTS,
-                    exc,
-                )
-                if attempt >= TELEGRAM_BACKGROUND_PREPARE_MAX_ATTEMPTS:
-                    break
-                await self._update_progress_message(
-                    progress_message=progress_message,
-                    text=(
-                        "文件仍在准备中，请稍后再试。\n"
-                        f"第 {attempt}/{TELEGRAM_BACKGROUND_PREPARE_MAX_ATTEMPTS} 次尝试未完成。"
-                    ),
-                    force=True,
-                )
-                await asyncio.sleep(TELEGRAM_BACKGROUND_PREPARE_RETRY_SECONDS)
-                continue
-
-            await self._update_progress_message(
-                progress_message=progress_message,
-                text=self._build_completion_message(link=link, cached_locally=True),
-                force=True,
-            )
-            return
-
-        if progress_message is not None:
-            error_text = "当前 Telegram 文件获取超时，请稍后重试。"
-            if last_error is not None and not self._is_timeout_error(last_error):
-                error_text = "处理失败，请稍后重试。"
-            await self._safe_edit_message(
-                chat_id=progress_message.chat_id,
-                message_id=progress_message.message_id,
-                text=error_text,
-            )
 
     async def _prepare_public_file_in_background(
         self,
@@ -846,80 +755,20 @@ class TelegramService:
             )
             return
 
-        media = self._extract_supported_media(message)
-        if media is not None:
-            reply_to_message_id = self._extract_message_id(message)
-            if reply_to_message_id is None:
-                raise TelegramServiceError("Telegram 消息缺少 message_id。")
-
-            progress_message = await self._create_progress_message(
+        if self._contains_media_payload(message):
+            await self._safe_send_message(
                 chat_id=chat_id,
-                reply_to_message_id=reply_to_message_id,
-                text="正在检查 Telegram 文件...",
+                text="只支持视频消息或 mime 为 video/* 的文件。",
+                reply_to_message_id=self._extract_message_id(message),
             )
-            try:
-                public_file = await self._register_media(
-                    media=media,
-                    chat_id=chat_id,
-                    message_id=reply_to_message_id,
-                )
-                link, _ = await self._prepare_public_file_link(
-                    public_file=public_file,
-                    progress_message=progress_message,
-                )
-            except Exception:
-                if progress_message is not None:
-                    await self._safe_edit_message(
-                        chat_id=progress_message.chat_id,
-                        message_id=progress_message.message_id,
-                        text="处理失败，请稍后重试。",
-                    )
-                raise
-
-            if progress_message is not None:
-                await self._safe_edit_message(
-                    chat_id=progress_message.chat_id,
-                    message_id=progress_message.message_id,
-                    text=f"已生成短链：\n{link}",
-                )
-            else:
-                await self._safe_send_message(
-                    chat_id=chat_id,
-                    text=link,
-                    reply_to_message_id=reply_to_message_id,
-                )
-
-            if settings.telegram_file_prefetch_enabled:
-                self._schedule_file_path_prefetch(public_id=public_file.public_id)
             return
 
-        link_result = await self.get_link_by_message(message)
-        if link_result is None:
-            if self._contains_media_payload(message):
-                await self._safe_send_message(
-                    chat_id=chat_id,
-                    text="只支持视频消息或 mime 为 video/* 的文件。",
-                    reply_to_message_id=self._extract_message_id(message),
-                )
-                return
-
-            if self._is_forwarded_message(message):
-                await self._safe_send_message(
-                    chat_id=chat_id,
-                    text="这条转发消息里没有可直接解析的视频文件。常见原因是原消息来自其他 Bot，或该频道消息未把媒体文件一并转发出来。请直接发送视频文件，或改发能直接打开的视频链接。",
-                    reply_to_message_id=self._extract_message_id(message),
-                )
-            return
-
-        link, public_id = link_result
-        await self._safe_send_message(
-            chat_id=chat_id,
-            text=link,
-            reply_to_message_id=self._extract_message_id(message),
-        )
-
-        if settings.telegram_file_prefetch_enabled:
-            self._schedule_file_path_prefetch(public_id=public_id)
+        if self._is_forwarded_message(message):
+            await self._safe_send_message(
+                chat_id=chat_id,
+                text="这条转发消息里没有可直接解析的视频文件。常见原因是原消息来自其他 Bot，或该频道消息未把媒体文件一并转发出来。请直接发送视频文件，或改发能直接打开的视频链接。",
+                reply_to_message_id=self._extract_message_id(message),
+            )
 
     async def handle_webhook_update(
         self,
@@ -1271,34 +1120,6 @@ class TelegramService:
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=str(exc),
             ) from exc
-
-        file_path = public_file.file_path
-        if force_refresh or not file_path:
-            file_path = await self._refresh_file_path(public_file)
-
-        if isinstance(file_path, str) and file_path:
-            local_path = self._resolve_accessible_local_path(file_path)
-            # 本地 Bot API 在 local 模式下可能直接返回绝对路径。
-            # 如果 telegram-bot-api 跑在 Docker 容器里，这里会先尝试把容器路径映射到宿主机路径。
-            if local_path is not None:
-                return TelegramResolvedTarget(
-                    file_name=public_file.file_name,
-                    content_type=public_file.content_type,
-                    local_path=local_path,
-                )
-
-            raw_local_path = Path(file_path)
-            if not raw_local_path.is_absolute():
-                return TelegramResolvedTarget(
-                    file_name=public_file.file_name,
-                    content_type=public_file.content_type,
-                    remote_url=self._build_file_download_url(file_path),
-                )
-
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Telegram 本地文件路径不可访问，请确认 Bot API 与当前服务部署在同一台机器。",
-        )
 
     def _resolve_accessible_local_path(self, file_path: str) -> Path | None:
         local_path = Path(file_path)
@@ -1802,7 +1623,6 @@ class TelegramService:
     async def _open_remote_stream(
         self,
         *,
-        client: httpx.AsyncClient,
         remote_url: str,
         request: Request,
     ) -> httpx.Response:
@@ -1816,19 +1636,6 @@ class TelegramService:
                 request_method=request.method.upper(),
                 headers=headers,
             )
-        except httpx.HTTPError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"代理 Telegram 文件失败：{exc}",
-            ) from exc
-
-        try:
-            built_request = client.build_request(
-                method=request.method.upper(),
-                url=remote_url,
-                headers=headers,
-            )
-            return await client.send(built_request, stream=True)
         except httpx.HTTPError as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
