@@ -384,23 +384,19 @@ class TelegramService:
         *,
         public_file: TelegramPublicFile,
         progress_message: TelegramProgressMessage | None,
-    ) -> str:
+    ) -> tuple[str, bool]:
+        link = storage_service.build_stream_url(public_file.public_id, public_file.file_name)
         cached_output = await self._get_cached_output_file(public_file)
         if cached_output is not None:
-            return storage_service.build_stream_url(public_file.public_id, public_file.file_name)
+            return link, True
 
         resolved = await self._resolve_download_source(public_file=public_file, force_refresh=False)
         if resolved.local_path is not None:
-            return storage_service.build_stream_url(public_file.public_id, public_file.file_name)
+            return link, True
         if resolved.remote_url is None:
             raise TelegramServiceError("Telegram 文件当前无法获取可下载地址。")
 
-        await self._download_public_file_to_output(
-            public_file=public_file,
-            remote_url=resolved.remote_url,
-            progress_message=progress_message,
-        )
-        return storage_service.build_stream_url(public_file.public_id, public_file.file_name)
+        return link, False
 
     async def _handle_media_update(
         self,
@@ -424,40 +420,8 @@ class TelegramService:
             message_id=reply_to_message_id,
         )
 
-        cached_output = await self._get_cached_output_file(public_file)
-        if cached_output is not None:
-            completion_text = self._build_completion_message(
-                link=storage_service.build_stream_url(public_file.public_id, public_file.file_name),
-                cached_locally=True,
-            )
-            if progress_message is not None:
-                await self._safe_edit_message(
-                    chat_id=progress_message.chat_id,
-                    message_id=progress_message.message_id,
-                    text=completion_text,
-                )
-            else:
-                await self._safe_send_message(
-                    chat_id=chat_id,
-                    text=completion_text,
-                    reply_to_message_id=reply_to_message_id,
-                )
-            return
-
-        if self._should_process_media_in_background(public_file):
-            await self._update_progress_message(
-                progress_message=progress_message,
-                text=self._build_background_prepare_text(public_file=public_file),
-                force=True,
-            )
-            self._schedule_background_prepare(
-                public_id=public_file.public_id,
-                progress_message=progress_message,
-            )
-            return
-
         try:
-            link = await self._prepare_public_file_link(
+            link, cached_locally = await self._prepare_public_file_link(
                 public_file=public_file,
                 progress_message=progress_message,
             )
@@ -470,7 +434,11 @@ class TelegramService:
                 )
             raise
 
-        completion_text = self._build_completion_message(link=link, cached_locally=True)
+        completion_text = self._build_completion_message(
+            link=link,
+            cached_locally=cached_locally,
+            cache_pending=not cached_locally,
+        )
         if progress_message is not None:
             await self._safe_edit_message(
                 chat_id=progress_message.chat_id,
@@ -484,8 +452,11 @@ class TelegramService:
                 reply_to_message_id=reply_to_message_id,
             )
 
-        if settings.telegram_file_prefetch_enabled:
-            self._schedule_file_path_prefetch(public_id=public_file.public_id)
+        if not cached_locally:
+            self._schedule_background_prepare(
+                public_id=public_file.public_id,
+                progress_message=progress_message,
+            )
 
     def _should_process_media_in_background(self, public_file: TelegramPublicFile) -> bool:
         threshold_mb = max(0, settings.telegram_sync_cache_max_mb)
@@ -512,6 +483,19 @@ class TelegramService:
         if cached_locally:
             return f"视频直链已生成：\n{link}\n\n资源已就绪，可直接播放。"
         return f"视频直链已生成：\n{link}"
+
+    def _build_completion_message(
+        self,
+        *,
+        link: str,
+        cached_locally: bool,
+        cache_pending: bool = False,
+    ) -> str:
+        if cached_locally:
+            return f"视频链接已生成：\n{link}\n\n资源已就绪，可直接播放。"
+        if cache_pending:
+            return f"视频链接已生成：\n{link}\n\n首次访问会走流式代理，后台会继续缓存。"
+        return f"视频链接已生成：\n{link}"
 
     async def _handle_url_message(
         self,
@@ -653,7 +637,7 @@ class TelegramService:
                 return
 
             try:
-                link = await self._prepare_public_file_link(
+                link, _ = await self._prepare_public_file_link(
                     public_file=public_file,
                     progress_message=progress_message,
                 )
@@ -695,6 +679,72 @@ class TelegramService:
                 message_id=progress_message.message_id,
                 text=error_text,
             )
+
+    async def _prepare_public_file_in_background(
+        self,
+        *,
+        public_id: str,
+        progress_message: TelegramProgressMessage | None,
+    ) -> None:
+        last_error: Exception | None = None
+        for attempt in range(1, TELEGRAM_BACKGROUND_PREPARE_MAX_ATTEMPTS + 1):
+            public_file = await self.get_public_file(public_id)
+            if public_file is None:
+                return
+
+            link = storage_service.build_stream_url(public_file.public_id, public_file.file_name)
+            try:
+                cached_output = await self._get_cached_output_file(public_file)
+                if cached_output is not None:
+                    await self._update_progress_message(
+                        progress_message=progress_message,
+                        text=self._build_completion_message(link=link, cached_locally=True),
+                        force=True,
+                    )
+                    return
+
+                resolved = await self._resolve_download_source(
+                    public_file=public_file,
+                    force_refresh=attempt > 1,
+                )
+                if resolved.local_path is not None:
+                    await self._update_progress_message(
+                        progress_message=progress_message,
+                        text=self._build_completion_message(link=link, cached_locally=True),
+                        force=True,
+                    )
+                    return
+                if resolved.remote_url is None:
+                    raise TelegramServiceError("Telegram 文件当前无法获取可下载地址。")
+
+                await self._download_public_file_to_output(
+                    public_file=public_file,
+                    remote_url=resolved.remote_url,
+                    progress_message=None,
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
+                logger.warning(
+                    "telegram background prepare failed: public_id=%s attempt=%s/%s error=%s",
+                    public_id,
+                    attempt,
+                    TELEGRAM_BACKGROUND_PREPARE_MAX_ATTEMPTS,
+                    exc,
+                )
+                if attempt >= TELEGRAM_BACKGROUND_PREPARE_MAX_ATTEMPTS:
+                    break
+                await asyncio.sleep(TELEGRAM_BACKGROUND_PREPARE_RETRY_SECONDS)
+                continue
+
+            await self._update_progress_message(
+                progress_message=progress_message,
+                text=self._build_completion_message(link=link, cached_locally=True),
+                force=True,
+            )
+            return
+
+        if last_error is not None:
+            logger.warning("telegram background caching gave up: public_id=%s error=%s", public_id, last_error)
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         message = self._extract_update_message(update)
@@ -759,7 +809,7 @@ class TelegramService:
                     chat_id=chat_id,
                     message_id=reply_to_message_id,
                 )
-                link = await self._prepare_public_file_link(
+                link, _ = await self._prepare_public_file_link(
                     public_file=public_file,
                     progress_message=progress_message,
                 )
