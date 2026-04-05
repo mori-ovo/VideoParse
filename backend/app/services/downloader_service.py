@@ -9,26 +9,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
-from urllib.parse import parse_qs
 from urllib.parse import urlparse
-from urllib.parse import urlunparse
 
 from app.core.config import settings
 from app.schemas.task import Platform
-from app.services.douyin_service import douyin_service
 from app.services.third_party_fallback_service import (
     ThirdPartyFallbackError,
     third_party_fallback_service,
 )
 
 logger = logging.getLogger(__name__)
-
-DOUYIN_BROWSER_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/135.0.0.0 Safari/537.36"
-)
-
+PURE_BILIBILI_BV_PATTERN = re.compile(r"^(?P<bvid>BV[0-9A-Za-z]{10})$", re.IGNORECASE)
 
 class DownloaderUnavailableError(RuntimeError):
     pass
@@ -182,11 +173,6 @@ class DownloaderService:
     def _extract_metadata_sync(self, url: str) -> ExtractedMedia:
         url = self._normalize_source_url(url)
         platform = self._detect_platform(url)
-
-        if platform == Platform.DOUYIN:
-            douyin_media = self._resolve_douyin_metadata(url)
-            if douyin_media is not None:
-                return douyin_media
 
         # YouTube 在低配机器上容易踩 bot check 或 JS 运行时问题，先走更稳的兜底。
         if platform in {Platform.YOUTUBE, Platform.IWARA}:
@@ -639,17 +625,12 @@ class DownloaderService:
                 media = third_party_fallback_service.resolve_twitter_media(url)
             elif platform == Platform.YOUTUBE:
                 media = third_party_fallback_service.resolve_youtube_media(url)
-            elif platform == Platform.DOUYIN:
-                media = third_party_fallback_service.resolve_douyin_media(url)
             elif platform == Platform.IWARA:
                 media = third_party_fallback_service.resolve_iwara_media(url)
             else:
                 return None
         except ThirdPartyFallbackError as exc:
-            if platform == Platform.DOUYIN:
-                logger.info("%s third-party fallback failed: %s", platform.value if platform else "unknown", exc)
-            else:
-                logger.warning("%s third-party fallback failed: %s", platform.value if platform else "unknown", exc)
+            logger.warning("%s third-party fallback failed: %s", platform.value if platform else "unknown", exc)
             return None
 
         if media is None:
@@ -670,39 +651,6 @@ class DownloaderService:
             video_ext=None,
             audio_ext=None,
             direct_headers={},
-            video_headers={},
-            audio_headers={},
-        )
-
-    def _resolve_douyin_metadata(self, url: str) -> ExtractedMedia | None:
-        request_options = self._resolve_platform_request_options(url)
-        if request_options.cookies_file is not None and not request_options.cookie_header:
-            return None
-
-        user_agent = request_options.user_agent or DOUYIN_BROWSER_USER_AGENT
-        media = douyin_service.resolve_media(
-            url=url,
-            cookie_header=request_options.cookie_header,
-            user_agent=user_agent,
-        )
-        if media is None:
-            return None
-
-        return ExtractedMedia(
-            title=media.title,
-            requires_merge=False,
-            direct_playable=True,
-            uploader=media.uploader,
-            duration=media.duration,
-            thumbnail=media.thumbnail,
-            extractor="douyin-web",
-            direct_url=media.direct_url,
-            video_url=None,
-            audio_url=None,
-            direct_ext=media.direct_ext,
-            video_ext=None,
-            audio_ext=None,
-            direct_headers=media.headers,
             video_headers={},
             audio_headers={},
         )
@@ -805,17 +753,6 @@ class DownloaderService:
         elif platform == Platform.TWITTER:
             cookie_header = self._build_twitter_cookie_header() or cookie_header
             cookies_file = settings.twitter_cookies_file or cookies_file
-        elif platform == Platform.DOUYIN:
-            # 抖音当前对匿名 Web 访问限制更严，优先使用平台专用 Cookie 和浏览器 UA。
-            cookie_header = self._build_douyin_cookie_header() or cookie_header
-            cookies_file = settings.douyin_cookies_file or cookies_file
-            user_agent = settings.douyin_user_agent or user_agent or DOUYIN_BROWSER_USER_AGENT
-            if not cookies_file:
-                cookie_header = douyin_service.enrich_cookie_header(
-                    url=url,
-                    cookie_header=cookie_header,
-                    user_agent=user_agent,
-                ) or cookie_header
         elif platform == Platform.IWARA:
             # 这些头既供 yt-dlp 尝试 Iwara 提取器使用，也供官方 API 兜底共用。
             cookie_header = self._normalize_cookie_header(settings.iwara_cookies) or cookie_header
@@ -855,23 +792,6 @@ class DownloaderService:
             {
                 "auth_token": settings.twitter_auth_token,
                 "ct0": settings.twitter_ct0,
-            }
-        )
-
-    def _build_douyin_cookie_header(self) -> str | None:
-        direct_value = self._normalize_cookie_header(settings.douyin_cookies)
-        if direct_value:
-            return direct_value
-
-        # 允许只填写抖音关键字段，后端自动拼成 Cookie 串。
-        return self._join_cookie_pairs(
-            {
-                "s_v_web_id": settings.douyin_s_v_web_id,
-                "ttwid": settings.douyin_ttwid,
-                "msToken": settings.douyin_ms_token,
-                "__ac_nonce": settings.douyin_ac_nonce,
-                "__ac_signature": settings.douyin_ac_signature,
-                "odin_tt": settings.douyin_odin_tt,
             }
         )
 
@@ -920,8 +840,6 @@ class DownloaderService:
         host = urlparse(url).netloc.lower()
         if "bilibili.com" in host or "b23.tv" in host:
             return Platform.BILIBILI
-        if "douyin.com" in host or "iesdouyin.com" in host or "v.douyin.com" in host:
-            return Platform.DOUYIN
         if "twitter.com" in host or "x.com" in host:
             return Platform.TWITTER
         if "youtube.com" in host or "youtu.be" in host:
@@ -976,23 +894,6 @@ class DownloaderService:
             ):
                 hints.append("可配置 TWITTER_AUTH_TOKEN，必要时补充 TWITTER_CT0")
 
-        if platform == Platform.DOUYIN:
-            if "Fresh cookies" in message or "Failed to download web detail JSON" in message:
-                if not self._has_douyin_cookies_configured():
-                    hints.append(
-                        "请在 backend/.env 配置 douyin_cookies / douyin_cookies_file，或单独填写 douyin_s_v_web_id、douyin_ttwid、douyin_ms_token 等字段"
-                    )
-                else:
-                    hints.append(
-                        "当前已配置 Douyin Cookie，但可能已经失效；请重新导出最新 Cookie，至少确保包含 s_v_web_id、ttwid、msToken 等字段"
-                    )
-                hints.append("后端已尝试自动补齐 ttwid、msToken 和 s_v_web_id；如果仍然失败，请同时补充 __ac_signature，或直接使用浏览器完整 Cookie")
-                hints.append("第三方 Douyin 兜底接口当前不稳定，建议优先依赖浏览器 Cookie 方案")
-            elif "Unsupported URL" in message and "/note/" in url:
-                hints.append("当前链接是 note 形式，后端会自动转换为 /video/{id} 后再解析")
-            elif "没有拿到可用的视频或音频地址" in message:
-                hints.append("这通常仍是 Douyin Web 侧校验导致的空结果，优先检查 DOUYIN_COOKIES 是否足够新")
-
         if platform == Platform.IWARA:
             if "Failed to parse JSON" in message or "invalid JSON" in message or "Cloudflare" in message:
                 hints.append("可配置 IWARA_AUTHORIZATION=Bearer ...，必要时补充 IWARA_COOKIES 和 IWARA_USER_AGENT")
@@ -1003,81 +904,12 @@ class DownloaderService:
             return message
         return f"{message} 建议：{'；'.join(hints)}"
 
-    def _has_douyin_cookies_configured(self) -> bool:
-        return any(
-            [
-                settings.douyin_cookies,
-                settings.douyin_cookies_file,
-                settings.douyin_s_v_web_id,
-                settings.douyin_ttwid,
-                settings.douyin_ms_token,
-                settings.douyin_ac_nonce,
-                settings.douyin_ac_signature,
-                settings.douyin_odin_tt,
-                settings.cookies,
-                settings.cookies_file,
-            ]
-        )
-
     def _normalize_source_url(self, source_url: str) -> str:
-        parsed = urlparse(source_url)
-        host = parsed.netloc.lower()
-        path = parsed.path.rstrip("/")
-        query = parse_qs(parsed.query)
-
-        # 下载器内部也做一次抖音归一化，避免外部直接调用时漏掉 note -> video 转换。
-        if host in {"www.douyin.com", "douyin.com"}:
-            note_match = re.fullmatch(r"/note/(?P<item_id>\d+)", path)
-            if note_match is not None:
-                return urlunparse(
-                    (
-                        parsed.scheme or "https",
-                        "www.douyin.com",
-                        f"/video/{note_match.group('item_id')}",
-                        "",
-                        "",
-                        "",
-                    )
-                )
-
-            # 抖音搜索页/发现页分享常带 modal_id，真实目标其实是具体视频页。
-            modal_id = self._extract_douyin_modal_id(query)
-            if modal_id is not None:
-                return urlunparse(
-                    (
-                        parsed.scheme or "https",
-                        "www.douyin.com",
-                        f"/video/{modal_id}",
-                        "",
-                        "",
-                        "",
-                    )
-                )
-
-        if host in {"iesdouyin.com", "www.iesdouyin.com"}:
-            share_match = re.fullmatch(r"/share/(?P<kind>note|video)/(?P<item_id>\d+)", path)
-            if share_match is not None:
-                return urlunparse(
-                    (
-                        parsed.scheme or "https",
-                        "www.douyin.com",
-                        f"/video/{share_match.group('item_id')}",
-                        "",
-                        "",
-                        "",
-                    )
-                )
-
-        return source_url
-
-    def _extract_douyin_modal_id(self, query: dict[str, list[str]]) -> str | None:
-        for key in ("modal_id", "item_id", "aweme_id"):
-            values = query.get(key) or []
-            for value in values:
-                normalized = value.strip()
-                if normalized.isdigit():
-                    return normalized
-        return None
+        normalized = source_url.strip()
+        match = PURE_BILIBILI_BV_PATTERN.fullmatch(normalized)
+        if match is None:
+            return normalized
+        return f"https://www.bilibili.com/video/{match.group('bvid')}"
 
     def _build_progress_hook(
         self,

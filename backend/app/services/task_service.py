@@ -8,7 +8,6 @@ import string
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse, urlunparse
 from uuid import uuid4
 
 from fastapi import HTTPException, status
@@ -30,12 +29,12 @@ logger = logging.getLogger(__name__)
 
 PLATFORM_PATTERNS: tuple[tuple[Platform, re.Pattern[str]], ...] = (
     (Platform.BILIBILI, re.compile(r"(bilibili\.com|b23\.tv)", re.IGNORECASE)),
-    (Platform.DOUYIN, re.compile(r"(douyin\.com|iesdouyin\.com|v\.douyin\.com)", re.IGNORECASE)),
     (Platform.TWITTER, re.compile(r"(twitter\.com|x\.com)", re.IGNORECASE)),
     (Platform.YOUTUBE, re.compile(r"(youtube\.com|youtu\.be)", re.IGNORECASE)),
     (Platform.REDDIT, re.compile(r"(reddit\.com|redd\.it)", re.IGNORECASE)),
     (Platform.IWARA, re.compile(r"(iwara\.tv)", re.IGNORECASE)),
 )
+PURE_BILIBILI_BV_PATTERN = re.compile(r"^(?P<bvid>BV[0-9A-Za-z]{10})$", re.IGNORECASE)
 
 TERMINAL_TASK_STATUSES = {TaskStatus.SUCCESS, TaskStatus.FAILED}
 FFMPEG_MISSING_MESSAGE = (
@@ -101,63 +100,11 @@ class TaskService:
         return task
 
     def normalize_source_url(self, source_url: str) -> str:
-        parsed = urlparse(source_url)
-        host = parsed.netloc.lower()
-        path = parsed.path.rstrip("/")
-        query = parse_qs(parsed.query)
-
-        if host in {"www.douyin.com", "douyin.com"}:
-            note_match = re.fullmatch(r"/note/(?P<item_id>\d+)", path)
-            if note_match is not None:
-                return urlunparse(
-                    (
-                        parsed.scheme or "https",
-                        "www.douyin.com",
-                        f"/video/{note_match.group('item_id')}",
-                        "",
-                        "",
-                        "",
-                    )
-                )
-
-            # 抖音搜索页/发现页分享常带 modal_id，真实目标其实是具体视频页。
-            modal_id = self._extract_douyin_modal_id(query)
-            if modal_id is not None:
-                return urlunparse(
-                    (
-                        parsed.scheme or "https",
-                        "www.douyin.com",
-                        f"/video/{modal_id}",
-                        "",
-                        "",
-                        "",
-                    )
-                )
-
-        if host in {"iesdouyin.com", "www.iesdouyin.com"}:
-            share_match = re.fullmatch(r"/share/(?P<kind>note|video)/(?P<item_id>\d+)", path)
-            if share_match is not None:
-                return urlunparse(
-                    (
-                        parsed.scheme or "https",
-                        "www.douyin.com",
-                        f"/video/{share_match.group('item_id')}",
-                        "",
-                        "",
-                        "",
-                    )
-                )
-
-        return source_url
-
-    def _extract_douyin_modal_id(self, query: dict[str, list[str]]) -> str | None:
-        for key in ("modal_id", "item_id", "aweme_id"):
-            values = query.get(key) or []
-            for value in values:
-                normalized = value.strip()
-                if normalized.isdigit():
-                    return normalized
-        return None
+        normalized = source_url.strip()
+        match = PURE_BILIBILI_BV_PATTERN.fullmatch(normalized)
+        if match is None:
+            return normalized
+        return f"https://www.bilibili.com/video/{match.group('bvid')}"
 
     async def get_task(self, task_id: str) -> TaskRecord | None:
         async with self._lock:
@@ -858,7 +805,7 @@ class TaskService:
 
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="当前只支持 bilibili、douyin、twitter/x、youtube、reddit、iwara 链接。",
+            detail="当前只支持 bilibili、twitter/x、youtube、reddit、iwara 链接，或纯 BV 号。",
         )
 
 

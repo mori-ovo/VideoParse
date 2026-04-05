@@ -120,52 +120,6 @@ class Settings(BaseSettings):
         validation_alias=env_alias_choices("TWITTER_CT0"),
     )
 
-    # 抖音完整 Cookie 串，优先级最高；已经有浏览器导出的整串时直接填这个。
-    douyin_cookies: str | None = Field(
-        default=None,
-        validation_alias=env_alias_choices("DOUYIN_COOKIES"),
-    )
-    # 抖音 Netscape 格式 Cookie 文件路径；只有在不填完整 Cookie 串时才会使用。
-    douyin_cookies_file: str | None = Field(
-        default=None,
-        validation_alias=env_alias_choices("DOUYIN_COOKIES_FILE"),
-    )
-    # 抖音浏览器 User-Agent，建议和导出 Cookie 的浏览器保持一致。
-    douyin_user_agent: str | None = Field(
-        default=None,
-        validation_alias=env_alias_choices("DOUYIN_USER_AGENT"),
-    )
-    # 抖音 Web 指纹字段，缺失时常见报错是 Fresh cookies。
-    douyin_s_v_web_id: str | None = Field(
-        default=None,
-        validation_alias=env_alias_choices("DOUYIN_S_V_WEB_ID"),
-    )
-    # 抖音访客会话标识，常用于基础风控识别。
-    douyin_ttwid: str | None = Field(
-        default=None,
-        validation_alias=env_alias_choices("DOUYIN_TTWID"),
-    )
-    # 抖音风控相关 Token，很多详情请求都依赖它。
-    douyin_ms_token: str | None = Field(
-        default=None,
-        validation_alias=env_alias_choices("DOUYIN_MS_TOKEN"),
-    )
-    # 抖音挑战参数之一，通常和 ac_signature 配套出现。
-    douyin_ac_nonce: str | None = Field(
-        default=None,
-        validation_alias=env_alias_choices("DOUYIN_AC_NONCE"),
-    )
-    # 抖音签名参数，部分视频详情请求会校验它。
-    douyin_ac_signature: str | None = Field(
-        default=None,
-        validation_alias=env_alias_choices("DOUYIN_AC_SIGNATURE"),
-    )
-    # 抖音设备/会话标识，某些场景会参与校验。
-    douyin_odin_tt: str | None = Field(
-        default=None,
-        validation_alias=env_alias_choices("DOUYIN_ODIN_TT"),
-    )
-
     iwara_authorization: str | None = Field(
         default=None,
         validation_alias=env_alias_choices("IWARA_AUTHORIZATION", "IWARA_BEARER_TOKEN"),

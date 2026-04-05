@@ -63,10 +63,6 @@ class ThirdPartyFallbackService:
         payload = self._fetch_iiilab_payload(url=url, site="youtube")
         return self._parse_iiilab_youtube_payload(payload, url)
 
-    def resolve_douyin_media(self, url: str) -> ThirdPartyMedia | None:
-        payload = self._fetch_iiilab_payload(url=url, site="douyin")
-        return self._parse_iiilab_generic_video_payload(payload, url, extractor="iiilab-douyin")
-
     def resolve_iwara_media(self, url: str) -> ThirdPartyMedia | None:
         video_id = self._extract_iwara_video_id(url)
         if video_id is None:

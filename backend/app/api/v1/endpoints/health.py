@@ -23,7 +23,6 @@ async def health_check() -> dict[str, object]:
         "default_delivery_mode": "auto",
         "supported_platforms": [
             "bilibili",
-            "douyin",
             "twitter",
             "youtube",
             "reddit",
