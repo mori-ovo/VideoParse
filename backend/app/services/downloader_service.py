@@ -2,7 +2,6 @@ import asyncio
 import importlib
 import logging
 import mimetypes
-import re
 import shutil
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -17,9 +16,9 @@ from app.services.third_party_fallback_service import (
     ThirdPartyFallbackError,
     third_party_fallback_service,
 )
+from app.utils.source_url import normalize_source_url_text
 
 logger = logging.getLogger(__name__)
-PURE_BILIBILI_BV_PATTERN = re.compile(r"^(?P<bvid>BV[0-9A-Za-z]{10})$", re.IGNORECASE)
 
 class DownloaderUnavailableError(RuntimeError):
     pass
@@ -173,6 +172,11 @@ class DownloaderService:
     def _extract_metadata_sync(self, url: str) -> ExtractedMedia:
         url = self._normalize_source_url(url)
         platform = self._detect_platform(url)
+
+        if platform == Platform.DOUYIN and self._should_use_douyin_fallback(url):
+            fallback_media = self._resolve_third_party_metadata(url)
+            if fallback_media is not None:
+                return fallback_media
 
         # YouTube 在低配机器上容易踩 bot check 或 JS 运行时问题，先走更稳的兜底。
         if platform in {Platform.YOUTUBE, Platform.IWARA}:
@@ -623,6 +627,10 @@ class DownloaderService:
         try:
             if platform == Platform.TWITTER:
                 media = third_party_fallback_service.resolve_twitter_media(url)
+            elif platform == Platform.DOUYIN:
+                if not self._should_use_douyin_fallback(url):
+                    return None
+                media = third_party_fallback_service.resolve_douyin_media(url)
             elif platform == Platform.YOUTUBE:
                 media = third_party_fallback_service.resolve_youtube_media(url)
             elif platform == Platform.IWARA:
@@ -840,6 +848,8 @@ class DownloaderService:
         host = urlparse(url).netloc.lower()
         if "bilibili.com" in host or "b23.tv" in host:
             return Platform.BILIBILI
+        if "douyin.com" in host or "iesdouyin.com" in host:
+            return Platform.DOUYIN
         if "twitter.com" in host or "x.com" in host:
             return Platform.TWITTER
         if "youtube.com" in host or "youtu.be" in host:
@@ -849,6 +859,10 @@ class DownloaderService:
         if "iwara.tv" in host:
             return Platform.IWARA
         return None
+
+    def _should_use_douyin_fallback(self, url: str) -> bool:
+        parsed = urlparse(self._normalize_source_url(url))
+        return parsed.netloc.lower() == "v.douyin.com"
 
     def _build_guided_error_message(self, url: str, raw_message: str) -> str:
         url = self._normalize_source_url(url)
@@ -900,16 +914,18 @@ class DownloaderService:
             if "errors.privateVideo" in message:
                 hints.append("当前 Iwara 视频可能需要登录态，请检查 IWARA_AUTHORIZATION 是否有效")
 
+        if platform == Platform.DOUYIN:
+            if settings.douyin_fallback_enabled:
+                hints.append("当前已启用第三方抖音兜底；优先粘贴抖音分享口令里的短链或 v.douyin.com 链接")
+            else:
+                hints.append("可启用 DOUYIN_FALLBACK_ENABLED=true，并配置 DOUYIN_FALLBACK_API_BASE")
+
         if not hints:
             return message
         return f"{message} 建议：{'；'.join(hints)}"
 
     def _normalize_source_url(self, source_url: str) -> str:
-        normalized = source_url.strip()
-        match = PURE_BILIBILI_BV_PATTERN.fullmatch(normalized)
-        if match is None:
-            return normalized
-        return f"https://www.bilibili.com/video/{match.group('bvid')}"
+        return normalize_source_url_text(source_url)
 
     def _build_progress_hook(
         self,

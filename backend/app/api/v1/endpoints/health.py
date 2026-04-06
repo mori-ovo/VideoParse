@@ -23,11 +23,14 @@ async def health_check() -> dict[str, object]:
         "default_delivery_mode": "auto",
         "supported_platforms": [
             "bilibili",
+            "douyin",
             "twitter",
             "youtube",
             "reddit",
             "iwara",
             "telegram-bot",
         ],
+        "douyin_fallback_enabled": settings.douyin_fallback_enabled,
+        "douyin_fallback_api_base": settings.douyin_fallback_api_base if settings.douyin_fallback_enabled else None,
         "telegram": telegram_service.status(),
     }

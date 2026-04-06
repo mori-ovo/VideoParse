@@ -63,6 +63,26 @@ class ThirdPartyFallbackService:
         payload = self._fetch_iiilab_payload(url=url, site="youtube")
         return self._parse_iiilab_youtube_payload(payload, url)
 
+    def resolve_douyin_media(self, url: str) -> ThirdPartyMedia | None:
+        if not settings.douyin_fallback_enabled:
+            return None
+
+        payload = self._post_json(
+            self._build_douyin_analyze_api_url(),
+            body={"share_link": url},
+            headers=self._build_douyin_headers(),
+            invalid_json_message="douyin fallback returned invalid JSON",
+            timeout_seconds=settings.douyin_fallback_timeout_seconds,
+        )
+        media = self._parse_douyin_payload(payload, url)
+        if media is not None:
+            return media
+
+        error_message = self._extract_error_message(payload)
+        if error_message:
+            raise ThirdPartyFallbackError(f"douyin fallback returned error: {error_message}")
+        return None
+
     def resolve_iwara_media(self, url: str) -> ThirdPartyMedia | None:
         video_id = self._extract_iwara_video_id(url)
         if video_id is None:
@@ -126,6 +146,19 @@ class ThirdPartyFallbackService:
             )
         return candidates
 
+    def _build_douyin_analyze_api_url(self) -> str:
+        return f"{settings.douyin_fallback_api_base}{settings.douyin_fallback_analyze_path}"
+
+    def _build_douyin_headers(self) -> dict[str, str]:
+        base = settings.douyin_fallback_api_base
+        return {
+            "User-Agent": settings.user_agent or "Mozilla/5.0",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Origin": base,
+            "Referer": f"{base}/zh/tools/douyin-downloader",
+        }
+
     def _fetch_json(
         self,
         url: str,
@@ -146,9 +179,63 @@ class ThirdPartyFallbackService:
         try:
             with urlopen(request, timeout=20) as response:
                 raw_body = response.read().decode("utf-8", "ignore")
-        except (HTTPError, URLError, TimeoutError) as exc:
+        except HTTPError as exc:
+            raise ThirdPartyFallbackError(self._build_http_error_message(exc)) from exc
+        except (URLError, TimeoutError) as exc:
             raise ThirdPartyFallbackError(f"third-party fallback request failed: {exc}") from exc
 
+        return self._decode_json_payload(
+            raw_body,
+            invalid_json_message=invalid_json_message,
+            expected_type=expected_type,
+        )
+
+    def _post_json(
+        self,
+        url: str,
+        body: dict[str, object],
+        headers: dict[str, str] | None = None,
+        *,
+        invalid_json_message: str | None = None,
+        expected_type: type[dict[str, object]] | type[list[object]] = dict,
+        timeout_seconds: int = 20,
+    ) -> dict[str, object] | list[object]:
+        request_headers = {
+            "User-Agent": "VideoParse/0.1",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        if headers:
+            request_headers.update(headers)
+
+        request = Request(
+            url,
+            data=json.dumps(body).encode("utf-8"),
+            headers=request_headers,
+            method="POST",
+        )
+
+        try:
+            with urlopen(request, timeout=max(1, timeout_seconds)) as response:
+                raw_body = response.read().decode("utf-8", "ignore")
+        except HTTPError as exc:
+            raise ThirdPartyFallbackError(self._build_http_error_message(exc)) from exc
+        except (URLError, TimeoutError) as exc:
+            raise ThirdPartyFallbackError(f"third-party fallback request failed: {exc}") from exc
+
+        return self._decode_json_payload(
+            raw_body,
+            invalid_json_message=invalid_json_message,
+            expected_type=expected_type,
+        )
+
+    def _decode_json_payload(
+        self,
+        raw_body: str,
+        *,
+        invalid_json_message: str | None,
+        expected_type: type[dict[str, object]] | type[list[object]],
+    ) -> dict[str, object] | list[object]:
         try:
             payload = json.loads(raw_body)
         except json.JSONDecodeError as exc:
@@ -161,6 +248,13 @@ class ThirdPartyFallbackService:
         if expected_type is list and not isinstance(payload, list):
             raise ThirdPartyFallbackError("third-party fallback returned unexpected payload")
         return payload
+
+    def _build_http_error_message(self, exc: HTTPError) -> str:
+        raw_body = exc.read().decode("utf-8", "ignore")
+        error_message = self._extract_error_message(raw_body)
+        if error_message:
+            return error_message
+        return f"third-party fallback request failed: HTTP {exc.code}"
 
     def _fetch_iiilab_payload(self, url: str, site: str) -> dict[str, object]:
         timestamp = str(int(time.time()))
@@ -244,6 +338,23 @@ class ThirdPartyFallbackService:
             return normalized
         return f"Bearer {normalized}"
 
+    def _extract_error_message(self, payload: dict[str, object] | str) -> str | None:
+        if isinstance(payload, dict):
+            for key in ("error", "message", "detail"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            return None
+
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            normalized = payload.strip()
+            return normalized or None
+        if not isinstance(parsed, dict):
+            return None
+        return self._extract_error_message(parsed)
+
     def _parse_fxtwitter_payload(
         self,
         payload: dict[str, object],
@@ -307,6 +418,29 @@ class ThirdPartyFallbackService:
             thumbnail=thumbnail if isinstance(thumbnail, str) and thumbnail.strip() else None,
             extractor="fxtwitter",
             direct_url=direct_url,
+            direct_ext="mp4",
+        )
+
+    def _parse_douyin_payload(
+        self,
+        payload: dict[str, object],
+        source_url: str,
+    ) -> ThirdPartyMedia | None:
+        direct_url = payload.get("download_url")
+        if not isinstance(direct_url, str) or not direct_url.strip():
+            return None
+
+        title = payload.get("title")
+        if not isinstance(title, str) or not title.strip():
+            title = source_url
+
+        return ThirdPartyMedia(
+            title=" ".join(title.split())[:160],
+            uploader=None,
+            duration=None,
+            thumbnail=None,
+            extractor="douyin-devresourcehub",
+            direct_url=direct_url.strip(),
             direct_ext="mp4",
         )
 

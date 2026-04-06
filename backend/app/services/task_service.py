@@ -24,17 +24,18 @@ from app.services.downloader_service import (
 )
 from app.services.storage_service import storage_service
 from app.utils.path import build_public_file_name
+from app.utils.source_url import normalize_source_url_text
 
 logger = logging.getLogger(__name__)
 
 PLATFORM_PATTERNS: tuple[tuple[Platform, re.Pattern[str]], ...] = (
     (Platform.BILIBILI, re.compile(r"(bilibili\.com|b23\.tv)", re.IGNORECASE)),
+    (Platform.DOUYIN, re.compile(r"(douyin\.com|iesdouyin\.com)", re.IGNORECASE)),
     (Platform.TWITTER, re.compile(r"(twitter\.com|x\.com)", re.IGNORECASE)),
     (Platform.YOUTUBE, re.compile(r"(youtube\.com|youtu\.be)", re.IGNORECASE)),
     (Platform.REDDIT, re.compile(r"(reddit\.com|redd\.it)", re.IGNORECASE)),
     (Platform.IWARA, re.compile(r"(iwara\.tv)", re.IGNORECASE)),
 )
-PURE_BILIBILI_BV_PATTERN = re.compile(r"^(?P<bvid>BV[0-9A-Za-z]{10})$", re.IGNORECASE)
 
 TERMINAL_TASK_STATUSES = {TaskStatus.SUCCESS, TaskStatus.FAILED}
 FFMPEG_MISSING_MESSAGE = (
@@ -110,11 +111,7 @@ class TaskService:
         return task
 
     def normalize_source_url(self, source_url: str) -> str:
-        normalized = source_url.strip()
-        match = PURE_BILIBILI_BV_PATTERN.fullmatch(normalized)
-        if match is None:
-            return normalized
-        return f"https://www.bilibili.com/video/{match.group('bvid')}"
+        return normalize_source_url_text(source_url)
 
     async def get_task(self, task_id: str) -> TaskRecord | None:
         async with self._lock:
@@ -178,7 +175,7 @@ class TaskService:
             if (
                 task.delivery_mode == DeliveryMode.DOWNLOAD
                 and metadata.direct_url
-                and metadata.extractor in {"iiilab", "fxtwitter"}
+                and metadata.extractor in {"iiilab", "fxtwitter", "douyin-devresourcehub"}
             ):
                 result = self._build_direct_result(
                     task_id=task_id,
@@ -860,7 +857,7 @@ class TaskService:
 
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="当前只支持 bilibili、twitter/x、youtube、reddit、iwara 链接，或纯 BV 号。",
+            detail="当前只支持 bilibili、douyin、twitter/x、youtube、reddit、iwara 链接，或纯 BV 号。",
         )
 
 

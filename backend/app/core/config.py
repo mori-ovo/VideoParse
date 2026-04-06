@@ -133,6 +133,23 @@ class Settings(BaseSettings):
         validation_alias=env_alias_choices("IWARA_USER_AGENT"),
     )
 
+    douyin_fallback_enabled: bool = Field(
+        default=True,
+        validation_alias=env_alias_choices("DOUYIN_FALLBACK_ENABLED"),
+    )
+    douyin_fallback_api_base: str = Field(
+        default="https://tools.devresourcehub.com",
+        validation_alias=env_alias_choices("DOUYIN_FALLBACK_API_BASE"),
+    )
+    douyin_fallback_analyze_path: str = Field(
+        default="/api/v1/douyin",
+        validation_alias=env_alias_choices("DOUYIN_FALLBACK_ANALYZE_PATH"),
+    )
+    douyin_fallback_timeout_seconds: int = Field(
+        default=20,
+        validation_alias=env_alias_choices("DOUYIN_FALLBACK_TIMEOUT_SECONDS"),
+    )
+
     telegram_bot_token: str | None = Field(
         default=None,
         validation_alias=env_alias_choices("TELEGRAM_BOT_TOKEN", "TG_BOT_TOKEN"),
@@ -300,6 +317,25 @@ class Settings(BaseSettings):
     def normalize_telegram_bot_api_base(cls, value: object) -> object:
         if isinstance(value, str):
             return value.strip().rstrip("/")
+        return value
+
+    @field_validator("douyin_fallback_api_base", mode="before")
+    @classmethod
+    def normalize_douyin_fallback_api_base(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().rstrip("/")
+        return value
+
+    @field_validator("douyin_fallback_analyze_path", mode="before")
+    @classmethod
+    def normalize_douyin_fallback_analyze_path(cls, value: object) -> object:
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                return "/api/v1/douyin"
+            if not normalized.startswith("/"):
+                return f"/{normalized}"
+            return normalized
         return value
 
     @field_validator("telegram_update_mode", mode="before")
