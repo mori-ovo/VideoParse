@@ -61,6 +61,7 @@ class PreparedMergedProcess:
     process: asyncio.subprocess.Process
     first_chunk: bytes
     stderr_task: asyncio.Task[str]
+    stream_completed: bool = False
 
 
 class ProxyService:
@@ -441,6 +442,7 @@ class ProxyService:
         while True:
             chunk = await stdout.read(settings.proxy_chunk_size)
             if not chunk:
+                prepared.stream_completed = True
                 break
             yield chunk
 
@@ -468,18 +470,30 @@ class ProxyService:
         return await stderr_task
 
     async def _close_merged_process(self, prepared: PreparedMergedProcess) -> None:
-        await self._terminate_process(prepared.process)
+        stop_reason = await self._terminate_process(prepared.process)
         stderr_output = await prepared.stderr_task
-        if prepared.process.returncode not in (0, None):
-            logger.warning(
-                "merged proxy ffmpeg exited with code=%s stderr=%s",
+        if prepared.process.returncode in (0, None):
+            return
+
+        if stop_reason != "natural":
+            logger.debug(
+                "merged proxy ffmpeg stopped by proxy cleanup reason=%s code=%s stderr=%s",
+                stop_reason,
                 prepared.process.returncode,
                 stderr_output,
             )
-
-    async def _terminate_process(self, process: asyncio.subprocess.Process) -> None:
-        if process.returncode is not None:
             return
+
+        logger.warning(
+            "merged proxy ffmpeg exited unexpectedly code=%s completed=%s stderr=%s",
+            prepared.process.returncode,
+            prepared.stream_completed,
+            stderr_output,
+        )
+
+    async def _terminate_process_legacy(self, process: asyncio.subprocess.Process) -> str:
+        if process.returncode is not None:
+            return "natural"
         try:
             # 优先等待自然结束，只有超时才强制 kill，避免正常收尾被中断。
             await asyncio.wait_for(process.wait(), timeout=1)
@@ -491,6 +505,36 @@ class ProxyService:
                 return
         except ProcessLookupError:
             return
+
+    async def _terminate_process(self, process: asyncio.subprocess.Process) -> str:
+        if process.returncode is not None:
+            return "natural"
+
+        try:
+            await asyncio.wait_for(process.wait(), timeout=1)
+            return "natural"
+        except asyncio.TimeoutError:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                return "natural"
+
+            try:
+                await asyncio.wait_for(process.wait(), timeout=3)
+                return "terminated"
+            except asyncio.TimeoutError:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    return "terminated"
+
+                try:
+                    await process.wait()
+                except ProcessLookupError:
+                    return "killed"
+                return "killed"
+        except ProcessLookupError:
+            return "natural"
 
     def _require_client(self) -> httpx.AsyncClient:
         if self._client is None:
