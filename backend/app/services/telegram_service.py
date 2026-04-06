@@ -47,6 +47,11 @@ TELEGRAM_BACKGROUND_PREPARE_MAX_ATTEMPTS = 5
 TELEGRAM_BACKGROUND_PREPARE_RETRY_SECONDS = 15
 TELEGRAM_FILE_INFO_ESTIMATE_BASE_SECONDS = 6.0
 TELEGRAM_FILE_INFO_DEFAULT_MB_PER_SECOND = 8.0
+TELEGRAM_FILE_INFO_SAMPLE_WINDOW = 100
+TELEGRAM_FILE_INFO_CONSERVATIVE_QUANTILE = 0.75
+TELEGRAM_FILE_INFO_MIN_COMBINED_BUCKET_SAMPLES = 4
+TELEGRAM_FILE_INFO_MIN_BUCKET_SAMPLES = 6
+TELEGRAM_FILE_INFO_MIN_OVERALL_SAMPLES = 8
 TELEGRAM_INLINE_PREPARE_MIN_WAIT_SECONDS = 30.0
 TELEGRAM_INLINE_PREPARE_POLL_INTERVAL_SECONDS = 0.25
 TELEGRAM_TASK_POLL_INTERVAL_SECONDS = 1.5
@@ -125,12 +130,14 @@ class TelegramProgressMessage:
 class TelegramTimingAverage:
     sample_count: int = 0
     avg_elapsed_seconds: float = 0.0
+    recent_samples: list[float] = field(default_factory=list)
 
 
 @dataclass
 class TelegramFileInfoEtaState:
     seconds_per_mb: float = 1.0 / TELEGRAM_FILE_INFO_DEFAULT_MB_PER_SECOND
     overall: TelegramTimingAverage = field(default_factory=TelegramTimingAverage)
+    combined_buckets: dict[str, TelegramTimingAverage] = field(default_factory=dict)
     size_buckets: dict[str, TelegramTimingAverage] = field(default_factory=dict)
     duration_buckets: dict[str, TelegramTimingAverage] = field(default_factory=dict)
 
@@ -555,10 +562,14 @@ class TelegramService:
 
     def _build_file_info_eta_summary(self) -> dict[str, object]:
         overall = self._file_info_eta_state.overall
+        p75_seconds = self._estimate_quantile_from_stats(overall, min_samples=1)
         return {
             "sample_count": overall.sample_count,
+            "recent_sample_count": len(overall.recent_samples),
             "avg_elapsed_seconds": round(overall.avg_elapsed_seconds, 2) if overall.sample_count > 0 else None,
+            "p75_elapsed_seconds": round(p75_seconds, 2) if p75_seconds is not None else None,
             "seconds_per_mb": round(self._file_info_eta_state.seconds_per_mb, 4),
+            "combined_bucket_count": len(self._file_info_eta_state.combined_buckets),
             "size_bucket_count": len(self._file_info_eta_state.size_buckets),
             "duration_bucket_count": len(self._file_info_eta_state.duration_buckets),
         }
@@ -566,32 +577,50 @@ class TelegramService:
     def _build_file_info_eta_diagnostics(self) -> dict[str, object]:
         overall = self._file_info_eta_state.overall
         return {
-            "overall": self._serialize_timing_average(self._file_info_eta_state.overall),
+            "overall": self._build_timing_stats_summary(self._file_info_eta_state.overall),
             "seconds_per_mb": round(self._file_info_eta_state.seconds_per_mb, 6),
+            "sample_window": TELEGRAM_FILE_INFO_SAMPLE_WINDOW,
+            "quantile": TELEGRAM_FILE_INFO_CONSERVATIVE_QUANTILE,
+            "combined_buckets": [
+                {
+                    "bucket": bucket,
+                    **self._build_timing_stats_summary(stats),
+                }
+                for bucket, stats in self._iter_sorted_timing_buckets(self._file_info_eta_state.combined_buckets)
+            ],
             "size_buckets": [
                 {
                     "bucket": bucket,
-                    **self._serialize_timing_average(stats),
+                    **self._build_timing_stats_summary(stats),
                 }
                 for bucket, stats in self._iter_sorted_timing_buckets(self._file_info_eta_state.size_buckets)
             ],
             "duration_buckets": [
                 {
                     "bucket": bucket,
-                    **self._serialize_timing_average(stats),
+                    **self._build_timing_stats_summary(stats),
                 }
                 for bucket, stats in self._iter_sorted_timing_buckets(self._file_info_eta_state.duration_buckets)
             ],
-            "enough_samples": overall.sample_count >= 8,
+            "enough_samples": overall.sample_count >= TELEGRAM_FILE_INFO_MIN_OVERALL_SAMPLES,
             "recommendation": self._build_file_info_eta_recommendation(overall.sample_count),
         }
 
     def _build_file_info_eta_recommendation(self, sample_count: int) -> str:
         if sample_count >= 20:
-            return "样本量已具备参考价值，倒计时会主要依赖历史平均。"
-        if sample_count >= 8:
-            return "样本量开始够用，但不同体量视频仍可能有明显偏差。"
+            return "样本量已具备参考价值，倒计时会优先使用分桶后的偏保守分位数。"
+        if sample_count >= TELEGRAM_FILE_INFO_MIN_OVERALL_SAMPLES:
+            return "样本量开始够用，但联合桶样本可能仍不足，部分情况还会回退到较粗粒度估算。"
         return "样本量偏少，当前倒计时仍会明显受初始估算影响。"
+
+    def _build_timing_stats_summary(self, stats: TelegramTimingAverage) -> dict[str, object]:
+        p75_seconds = self._estimate_quantile_from_stats(stats, min_samples=1)
+        return {
+            "sample_count": stats.sample_count,
+            "recent_sample_count": len(stats.recent_samples),
+            "avg_elapsed_seconds": round(stats.avg_elapsed_seconds, 2) if stats.sample_count > 0 else None,
+            "p75_elapsed_seconds": round(p75_seconds, 2) if p75_seconds is not None else None,
+        }
 
     def _iter_sorted_timing_buckets(
         self,
@@ -602,12 +631,17 @@ class TelegramService:
             key=lambda item: self._timing_bucket_sort_key(item[0]),
         )
 
-    def _timing_bucket_sort_key(self, label: str) -> tuple[int, int, str]:
+    def _timing_bucket_sort_key(self, label: str) -> tuple[int, int, int, str]:
+        if "|" in label:
+            size_label, duration_label = label.split("|", 1)
+            size_key = self._timing_bucket_sort_key(size_label)
+            duration_key = self._timing_bucket_sort_key(duration_label)
+            return (0, size_key[1], duration_key[1], label)
         match = re.search(r"_(\d+)(mb|s)$", label)
         if match is None:
-            return (2, 0, label)
+            return (3, 0, 0, label)
         unit_rank = 0 if match.group(2) == "mb" else 1
-        return (unit_rank, int(match.group(1)), label)
+        return (unit_rank + 1, int(match.group(1)), 0, label)
 
     def _estimate_file_info_remaining_seconds(
         self,
@@ -635,48 +669,52 @@ class TelegramService:
         file_size: int | None,
         duration_seconds: int | None,
     ) -> int | None:
-        estimates: list[tuple[float, float]] = []
+        combined_bucket = self._get_combined_bucket_label(
+            file_size=file_size,
+            duration_seconds=duration_seconds,
+        )
+        size_bucket = self._get_file_size_bucket_label(file_size)
+        duration_bucket = self._get_duration_bucket_label(duration_seconds)
+
+        combined_estimate = self._estimate_quantile_for_bucket(
+            bucket_key=combined_bucket,
+            buckets=self._file_info_eta_state.combined_buckets,
+            min_samples=TELEGRAM_FILE_INFO_MIN_COMBINED_BUCKET_SAMPLES,
+        )
+        if combined_estimate is not None:
+            return self._bound_file_info_estimate(combined_estimate)
+
+        size_estimate = self._estimate_quantile_for_bucket(
+            bucket_key=size_bucket,
+            buckets=self._file_info_eta_state.size_buckets,
+            min_samples=TELEGRAM_FILE_INFO_MIN_BUCKET_SAMPLES,
+        )
+        duration_estimate = self._estimate_quantile_for_bucket(
+            bucket_key=duration_bucket,
+            buckets=self._file_info_eta_state.duration_buckets,
+            min_samples=TELEGRAM_FILE_INFO_MIN_BUCKET_SAMPLES,
+        )
+        if size_estimate is not None and duration_estimate is not None:
+            return self._bound_file_info_estimate(max(size_estimate, duration_estimate))
+        if size_estimate is not None:
+            return self._bound_file_info_estimate(size_estimate)
+        if duration_estimate is not None:
+            return self._bound_file_info_estimate(duration_estimate)
+
+        overall_estimate = self._estimate_quantile_from_stats(
+            self._file_info_eta_state.overall,
+            min_samples=TELEGRAM_FILE_INFO_MIN_OVERALL_SAMPLES,
+        )
+        if overall_estimate is not None:
+            return self._bound_file_info_estimate(overall_estimate)
 
         linear_estimate = self._estimate_file_info_linear_seconds(file_size=file_size)
         if linear_estimate is not None:
-            estimates.append((linear_estimate, 1.0))
+            return self._bound_file_info_estimate(linear_estimate)
+        return None
 
-        size_bucket = self._get_file_size_bucket_label(file_size)
-        if size_bucket is not None:
-            bucket_stats = self._file_info_eta_state.size_buckets.get(size_bucket)
-            if bucket_stats is not None and bucket_stats.sample_count > 0:
-                estimates.append(
-                    (
-                        bucket_stats.avg_elapsed_seconds,
-                        min(8.0, float(bucket_stats.sample_count)) * 2.0,
-                    )
-                )
-
-        duration_bucket = self._get_duration_bucket_label(duration_seconds)
-        if duration_bucket is not None:
-            bucket_stats = self._file_info_eta_state.duration_buckets.get(duration_bucket)
-            if bucket_stats is not None and bucket_stats.sample_count > 0:
-                estimates.append(
-                    (
-                        bucket_stats.avg_elapsed_seconds,
-                        min(6.0, float(bucket_stats.sample_count)) * 1.5,
-                    )
-                )
-
-        overall_stats = self._file_info_eta_state.overall
-        if overall_stats.sample_count > 0:
-            estimates.append(
-                (
-                    overall_stats.avg_elapsed_seconds,
-                    min(4.0, float(overall_stats.sample_count)),
-                )
-            )
-
-        if not estimates:
-            return None
-
-        weighted_seconds = sum(seconds * weight for seconds, weight in estimates) / sum(weight for _, weight in estimates)
-        bounded_seconds = min(float(settings.telegram_file_timeout_seconds), weighted_seconds)
+    def _bound_file_info_estimate(self, seconds: float) -> int:
+        bounded_seconds = min(float(settings.telegram_file_timeout_seconds), max(1.0, seconds))
         return max(1, int(bounded_seconds + 0.999))
 
     def _estimate_file_info_linear_seconds(self, *, file_size: int | None) -> float | None:
@@ -697,6 +735,14 @@ class TelegramService:
             return
 
         self._update_timing_average(self._file_info_eta_state.overall, elapsed_seconds)
+
+        combined_bucket = self._get_combined_bucket_label(
+            file_size=file_size,
+            duration_seconds=duration_seconds,
+        )
+        if combined_bucket is not None:
+            bucket_stats = self._file_info_eta_state.combined_buckets.setdefault(combined_bucket, TelegramTimingAverage())
+            self._update_timing_average(bucket_stats, elapsed_seconds)
 
         size_bucket = self._get_file_size_bucket_label(file_size)
         if size_bucket is not None:
@@ -723,6 +769,45 @@ class TelegramService:
     def _update_timing_average(self, stats: TelegramTimingAverage, elapsed_seconds: float) -> None:
         stats.sample_count += 1
         stats.avg_elapsed_seconds += (elapsed_seconds - stats.avg_elapsed_seconds) / stats.sample_count
+        stats.recent_samples.append(float(elapsed_seconds))
+        if len(stats.recent_samples) > TELEGRAM_FILE_INFO_SAMPLE_WINDOW:
+            del stats.recent_samples[:-TELEGRAM_FILE_INFO_SAMPLE_WINDOW]
+
+    def _estimate_quantile_for_bucket(
+        self,
+        *,
+        bucket_key: str | None,
+        buckets: dict[str, TelegramTimingAverage],
+        min_samples: int,
+    ) -> float | None:
+        if not isinstance(bucket_key, str):
+            return None
+        return self._estimate_quantile_from_stats(buckets.get(bucket_key), min_samples=min_samples)
+
+    def _estimate_quantile_from_stats(
+        self,
+        stats: TelegramTimingAverage | None,
+        *,
+        min_samples: int,
+    ) -> float | None:
+        if stats is None:
+            return None
+        if len(stats.recent_samples) < min_samples:
+            return None
+        return self._calculate_quantile(
+            stats.recent_samples,
+            TELEGRAM_FILE_INFO_CONSERVATIVE_QUANTILE,
+        )
+
+    def _calculate_quantile(self, values: list[float], quantile: float) -> float | None:
+        if not values:
+            return None
+        sorted_values = sorted(value for value in values if isinstance(value, (int, float)) and value > 0)
+        if not sorted_values:
+            return None
+        normalized_quantile = min(1.0, max(0.0, quantile))
+        position = int((len(sorted_values) - 1) * normalized_quantile + 0.999999)
+        return float(sorted_values[position])
 
     def _get_file_size_bucket_label(self, file_size: int | None) -> str | None:
         if not isinstance(file_size, int) or file_size <= 0:
@@ -742,6 +827,18 @@ class TelegramService:
             if duration_seconds <= upper_bound:
                 return f"duration_le_{upper_bound}s"
         return "duration_gt_3600s"
+
+    def _get_combined_bucket_label(
+        self,
+        *,
+        file_size: int | None,
+        duration_seconds: int | None,
+    ) -> str | None:
+        size_bucket = self._get_file_size_bucket_label(file_size)
+        duration_bucket = self._get_duration_bucket_label(duration_seconds)
+        if size_bucket is None or duration_bucket is None:
+            return None
+        return f"{size_bucket}|{duration_bucket}"
 
     def _build_finalize_progress_text(self, *, file_name: str, step_text: str) -> str:
         return "\n".join(
@@ -2497,6 +2594,15 @@ class TelegramService:
         if overall is not None:
             state.overall = overall
 
+        combined_buckets = payload.get("combined_buckets")
+        if isinstance(combined_buckets, dict):
+            for key, value in combined_buckets.items():
+                if not isinstance(key, str):
+                    continue
+                parsed = self._parse_timing_average(value)
+                if parsed is not None:
+                    state.combined_buckets[key] = parsed
+
         size_buckets = payload.get("size_buckets")
         if isinstance(size_buckets, dict):
             for key, value in size_buckets.items():
@@ -2527,15 +2633,31 @@ class TelegramService:
             return None
         if not isinstance(avg_elapsed_seconds, (int, float)) or avg_elapsed_seconds <= 0:
             return None
+        recent_samples = payload.get("recent_samples")
+        parsed_samples: list[float] = []
+        if isinstance(recent_samples, list):
+            for item in recent_samples:
+                if isinstance(item, (int, float)) and item > 0:
+                    parsed_samples.append(float(item))
+            if len(parsed_samples) > TELEGRAM_FILE_INFO_SAMPLE_WINDOW:
+                parsed_samples = parsed_samples[-TELEGRAM_FILE_INFO_SAMPLE_WINDOW:]
+        elif sample_count > 0:
+            bootstrap_count = min(sample_count, TELEGRAM_FILE_INFO_MIN_OVERALL_SAMPLES)
+            parsed_samples = [float(avg_elapsed_seconds)] * bootstrap_count
         return TelegramTimingAverage(
             sample_count=sample_count,
             avg_elapsed_seconds=float(avg_elapsed_seconds),
+            recent_samples=parsed_samples,
         )
 
     def _serialize_file_info_eta_state(self) -> dict[str, object]:
         return {
             "seconds_per_mb": self._file_info_eta_state.seconds_per_mb,
             "overall": self._serialize_timing_average(self._file_info_eta_state.overall),
+            "combined_buckets": {
+                key: self._serialize_timing_average(value)
+                for key, value in self._file_info_eta_state.combined_buckets.items()
+            },
             "size_buckets": {
                 key: self._serialize_timing_average(value)
                 for key, value in self._file_info_eta_state.size_buckets.items()
@@ -2550,6 +2672,7 @@ class TelegramService:
         return {
             "sample_count": stats.sample_count,
             "avg_elapsed_seconds": stats.avg_elapsed_seconds,
+            "recent_samples": stats.recent_samples[-TELEGRAM_FILE_INFO_SAMPLE_WINDOW:],
         }
 
     def _mark_state_dirty(self) -> None:
