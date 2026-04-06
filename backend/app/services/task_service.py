@@ -521,7 +521,7 @@ class TaskService:
             audio_proxy_url=result.audio_proxy_url,
         )
 
-    def _migrate_iwara_short_file_result(self, task: TaskRecord, result: TaskResult) -> TaskResult:
+    def _migrate_proxy_short_file_result(self, task: TaskRecord, result: TaskResult) -> TaskResult:
         existing_extension = Path(result.file_name).suffix if result.file_name else ""
         extension = existing_extension.lstrip(".") or settings.merge_output_format
         file_id = result.file_id or self._generate_public_file_id()
@@ -546,6 +546,9 @@ class TaskService:
         if not updates:
             return result
         return result.model_copy(update=updates)
+
+    def _migrate_iwara_short_file_result(self, task: TaskRecord, result: TaskResult) -> TaskResult:
+        return self._migrate_proxy_short_file_result(task=task, result=result)
 
     async def get_task_by_file_id(self, file_id: str) -> TaskRecord | None:
         async with self._lock:
@@ -821,24 +824,11 @@ class TaskService:
             return task
 
         if result.result_type == ResultType.DIRECT:
-            if task.platform == Platform.IWARA and result.proxy_url:
-                migrated_result = self._migrate_iwara_short_file_result(task=task, result=result)
+            if result.file_id or result.redirect_url:
+                migrated_result = self._migrate_proxy_short_file_result(task=task, result=result)
                 if migrated_result is not result:
                     return task.model_copy(update={"result": migrated_result})
-                return task
-
-            if not result.redirect_url:
-                return task
-            if result.play_url == result.redirect_url and result.download_url == result.redirect_url:
-                return task
-
-            migrated_result = result.model_copy(
-                update={
-                    "play_url": result.redirect_url,
-                    "download_url": result.redirect_url,
-                }
-            )
-            return task.model_copy(update={"result": migrated_result})
+            return task
 
         if result.result_type == ResultType.DOWNLOAD and result.file_id and result.file_name:
             expected_play_url = storage_service.build_stream_url(result.file_id, result.file_name)
