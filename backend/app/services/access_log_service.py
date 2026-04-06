@@ -3,6 +3,7 @@ import logging
 import threading
 from dataclasses import dataclass, field
 from time import monotonic
+from urllib.parse import unquote
 
 from app.core.config import settings
 
@@ -98,7 +99,6 @@ class MediaAccessLogService:
             if client_addr:
                 entry.clients.add(client_addr)
 
-        # 返回 False，拦截原始 access log，避免分段请求刷屏。
         return False
 
     async def _flush_loop(self) -> None:
@@ -128,19 +128,19 @@ class MediaAccessLogService:
                 self._entries.pop(key, None)
 
         for entry in sorted(ready_entries, key=lambda item: (item.path, item.method)):
-            duration = max(0.1, entry.last_seen_at - entry.first_seen_at)
-            status_summary = ",".join(
-                f"{status}x{count}" for status, count in sorted(entry.status_counts.items())
-            )
             logger.info(
-                "媒体访问聚合 method=%s count=%s statuses=%s clients=%s window=%.1fs path=%s",
-                entry.method,
-                entry.count,
-                status_summary,
-                len(entry.clients),
-                duration,
-                entry.path,
+                "媒体访问 | %s",
+                self._build_target_name(entry.path),
             )
+
+    def _build_target_name(self, path: str) -> str:
+        prefix = f"{settings.api_v1_prefix}/files/"
+        normalized_path = path.split("?", 1)[0]
+        if normalized_path.startswith(prefix):
+            relative_path = normalized_path[len(prefix):].strip("/")
+            if relative_path:
+                return unquote(relative_path)
+        return unquote(normalized_path)
 
     def _parse_access_record(self, record: logging.LogRecord) -> tuple[str, str, str, int] | None:
         args = record.args
